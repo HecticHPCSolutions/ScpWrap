@@ -134,23 +134,23 @@ def private_browser(url):
     else:
         raise ValueError(f"Browser {default} is not supported. SCPWrap supports MSEdge, Firefox and Chrome.")
 
-def get_config() -> Config:
-    root = tkinter.Tk()
-    root.withdraw()  # Hide the main window
+# def get_config() -> Config:
+#     root = tkinter.Tk()
+#     root.withdraw()  # Hide the main window
 
-    # Prompt for a directory
-    configfile = filedialog.askopenfilename(
-        title="Select a config", initialdir=os.path.dirname(os.path.realpath(__file__)))
-    if configfile == () or configfile == "": # Detect if user cancels and doesn't pick a config
-        sys.exit(1)
+#     # Prompt for a directory
+#     configfile = filedialog.askopenfilename(
+#         title="Select a config", initialdir=os.path.dirname(os.path.realpath(__file__)))
+#     if configfile == () or configfile == "": # Detect if user cancels and doesn't pick a config
+#         sys.exit(1)
 
-    # Close UI objects
-    root.destroy()
+#     # Close UI objects
+#     root.destroy()
 
-    with open(configfile,'r') as f:
-        configdata = yaml.safe_load(f)
+#     with open(configfile,'r') as f:
+#         configdata = yaml.safe_load(f)
 
-    return Config(**configdata)
+#     return Config(**configdata)
 
 def setup(localbase: str, workdir: str, config: Config) -> Tuple[str, str]:
     initialdir = os.path.expanduser(localbase)
@@ -372,7 +372,13 @@ def main():
         #     }
 
         # config = Config(**configdata)
-        config = get_config()
+        # config = get_config()
+        config = Config(**{
+            'localbase': os.path.expanduser('~'),
+            'remotebase': 'test',
+            'remote_host': os.environ['REMOTE_HOST'],
+            'sshauthz': os.environ['SSHAUTHZ']
+        })
 
         # Setup ssh config
         (dir, ssh_config, ssh_details, delete_agreement) = setup(config.localbase, workdir, config)

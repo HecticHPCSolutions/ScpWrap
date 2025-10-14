@@ -1,0 +1,5 @@
+entry = "main.py"
+
+[env]
+REMOTE_HOST = "sshauthz.globus-development.cloud.edu.au"
+SSHAUTHZ = "https://sshauthz.globus-development.cloud.edu.au/?ca=ca"
