@@ -221,8 +221,8 @@ def copy(dir: str, config: Config, workdir: str, sshconfig: str):
     srcdir = Path(os.path.expanduser(dir))
     if not srcdir.is_dir():
         raise ValueError(f"Directory {srcdir} does not exist.")
-    rel_path = os.path.relpath(dir, config.localbase)
-    print("Relative path:", rel_path)
+    # rel_path = os.path.relpath(dir, config.localbase)
+    # print("Relative path:", rel_path)
 
     # Get remote path from config
     remote_dir = config.remotebase
