@@ -375,7 +375,7 @@ def main():
         # config = get_config()
         config = Config(**{
             'localbase': os.path.expanduser('~'),
-            'remotebase': 'test',
+            'remotebase': 'instrument_data',
             'remote_host': os.environ['REMOTE_HOST'],
             'sshauthz': os.environ['SSHAUTHZ']
         })
