@@ -112,23 +112,20 @@ def mk_ssh_config(workdir: Path, ssh_config: str, config: Config):
 
 
 def private_browser(url):
-    if os.name == 'nt':  # Windows
-        try:
-            subprocess.run([
-                "start",
-                "msedge.exe",
-                url.replace("&", "^&"),
-                "-inprivate"
-            ], shell=True)
-            return
-        except:
-            print("MS Edge not found")
-
     default = webbrowser.get()
-    if "firefox" in default.name.lower():
+    name = type(default).__name__.lower()
+    
+    if "windowsdefault" in name:
+        subprocess.run([
+            "start",
+            "msedge.exe",
+            url.replace("&", "^&"),
+            "-inprivate"
+        ], shell=True)
+    elif "firefox" in name:
        webbrowser.get(f"{default.name} -private-window %s").open_new(url)
        return
-    if "chrome" in default.name.lower():
+    elif "chrome" in name:
        webbrowser.get(f"{default.name} --incognito %s").open_new(url)
        return
     else:
