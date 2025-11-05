@@ -1,4 +1,0 @@
-localbase: 'F:/'
-remotebase: 'test'
-remote_host: sshauthz.globus-development.cloud.edu.au
-sshauthz: https://sshauthz.globus-development.cloud.edu.au/?ca=ca

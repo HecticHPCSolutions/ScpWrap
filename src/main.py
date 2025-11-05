@@ -124,14 +124,22 @@ def private_browser(url):
         except subprocess.CalledProcessError:
             print("MSEdge not found")
 
-        try:
-            # Default chrome installation path
-            chrome_path = 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe %s --incognito'
-            webbrowser.get(chrome_path).open_new(url)
-            return
-        except webbrowser.Error:
-            print("Chrome not found")
         
+        # Default chrome installation path
+        chrome_path = 'C:/Program Files/Google/Chrome/Application/chrome.exe %s --incognito'
+        web_bool = webbrowser.get(chrome_path).open_new(url)
+        if web_bool:
+            return
+        else:
+            print("Chrome not found, searching x86")
+
+        chrome_path_x86 = 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe %s --incognito'
+        web_bool = webbrowser.get(chrome_path_x86).open_new(url)
+        if web_bool:
+            return
+        else:
+            print("Chrome not found")    
+
         print("Supported web browsers not found, please install either MSEdge or Chrome")
         input("Press ENTER to exit.")
         sys.exit(1)
