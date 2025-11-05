@@ -111,25 +111,32 @@ def mk_ssh_config(workdir: Path, ssh_config: str, config: Config):
     return (config.remote_host, principals[0], ssh_key_path)
 
 
-def private_browser(url):
-    default = webbrowser.get()
-    name = type(default).__name__.lower()
-    
-    if "windowsdefault" in name:
-        subprocess.run([
-            "start",
-            "msedge.exe",
-            url.replace("&", "^&"),
-            "-inprivate"
-        ], shell=True)
-    elif "firefox" in name:
-       webbrowser.get(f"{default.name} -private-window %s").open_new(url)
-       return
-    elif "chrome" in name:
-       webbrowser.get(f"{default.name} --incognito %s").open_new(url)
-       return
+def private_browser(url):    
+    if os.name == 'nt':  # Windows
+        try:
+            subprocess.run([
+                "start",
+                "msedge.exe",
+                url.replace("&", "^&"),
+                "-inprivate"
+            ], shell=True, check=True)
+            return
+        except subprocess.CalledProcessError:
+            print("MSEdge not found")
+
+        try:
+            # Default chrome installation path
+            chrome_path = 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe %s --incognito'
+            webbrowser.get(chrome_path).open_new(url)
+            return
+        except webbrowser.Error:
+            print("Chrome not found")
+        
+        print("Supported web browsers not found, please install either MSEdge or Chrome")
+        input("Press ENTER to exit.")
+        sys.exit(1)
     else:
-        raise ValueError(f"Browser {default} is not supported. SCPWrap supports MSEdge, Firefox and Chrome.")
+        print("ScpWrap currently only supports windows")
 
 # def get_config() -> Config:
 #     root = tkinter.Tk()
