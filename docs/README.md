@@ -11,12 +11,11 @@ SCP wrap was written to upload data from a shared instrument PC to your own mark
 
 ## Installation
 
-### Global Installation (Production)
+### PyCrucible Installation (Production)
 Use this if your computer is locked down and has running scripts disabled.
-1. Install Python from the Microsoft Store
-2. `pip install paramiko pyyaml speedtest-cli`
-3. Create an installation folder and copy `scpwrap.py` to the installation folder
-4. Configure the computer to launch python scripts using the Python version you just installed
+1. Download scpwrap.exe from [GitHub](https://github.com/HecticHPCSolutions/ScpWrap/releases/)
+2. Create an installation folder and copy `scpwrap.exe` to the installation folder
+3. Launching the PyCrucible executable will unpack the PyCrucible payload into the installation folder and launch the application
 
 ### Virtual Environment Installation (Development)
 Use this if you have more control over your computer or if you're a developer
@@ -24,35 +23,27 @@ Use this if you have more control over your computer or if you're a developer
 2. Activate the environment with:  
    1. Unix: `source .venv/bin/activate`  
    2. Windows: `.venv/Scripts/activate`
-3. `pip install -r requirements.txt`
+3. `pip install -r src/requirements.txt`
+4. `pip install pycrucible`
+
+### PyCrucible Build
+Use this to build the scpwrap.exe file from source
+1. Activate the environment with:  
+   1. Unix: `source .venv/bin/activate`  
+   2. Windows: `.venv/Scripts/activate`
+2. `pycrucible -e src -o scpwrap.exe`
 
 ## Instructions
 0. Activate the virtual environment if you are using one
-1. Double click on `scpwrap.py` or run the script in the command line
-2. Select your config. It should be in the following format:
-   ```
-   localbase: '{The drive your data is stored on}'
-   remotebase: '{The remote server path you want your data moved to}'
-   remote_host: sshauthz.globus-development.cloud.edu.au
-   sshauthz: https://sshauthz.globus-development.cloud.edu.au/?ca=ca
-   ```
-   Example:
-   ```
-   localbase: 'F:/'
-   remotebase: 'name-of-your-market/example-folder'
-   remote_host: sshauthz.globus-development.cloud.edu.au
-   sshauthz: https://sshauthz.globus-development.cloud.edu.au/?ca=ca
-   ```
-   Note that this folder should exist before you start moving  
-   ![Config Selection](./config.png)
-3. Select a folder to move  
+1. Double click on `scpwrap.exe` or run the script in the command line
+2. Select a folder to move  
    ![Folder Selection](./folder.png)
-5. Confirm if you are deleting the dataset after moving  
+3. Confirm if you are deleting the dataset after moving  
    ![Confirm](./confirm.png)
-7. Authenticate with your Google account (your Monash details) in the popup web browser  
+4. Authenticate with your Google account (your Monash details) in the popup web browser  
    ![Login](./login.png) ![Google](./google.png) ![Okta](./okta.png)
-8. Save your certificate  
+5. Save your certificate  
    ![Save Certificate](./save_cert.png)
-9.  Close the web browser
-10. Leave the process running as it moves your data
-11. Press ENTER to exit
+6.  Close the web browser
+7.  Leave the process running as it moves your data
+8.  Press ENTER to exit
