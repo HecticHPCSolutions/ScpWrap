@@ -137,6 +137,8 @@ def private_browser(url):
         sys.exit(1)
     else:
         print("ScpWrap currently only supports windows")
+        input("Press ENTER to exit.")
+        sys.exit(1)
 
 # def get_config() -> Config:
 #     root = tkinter.Tk()
