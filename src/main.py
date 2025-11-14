@@ -1,6 +1,5 @@
 import datetime
-import tkinter
-import yaml
+import logging
 import os
 import paramiko
 import posixpath
@@ -10,13 +9,18 @@ import subprocess
 import sys
 import tempfile
 import time
+import tkinter
 import webbrowser
+import yaml
+from logging.handlers import TimedRotatingFileHandler
 from os import PathLike
 from pathlib import Path
 from tkinter import ttk
 from tkinter import filedialog
 from typing import Tuple
 from urllib.parse import urlencode
+
+VERSION = "v1.4"
 
 class Config:
     localbase: str
@@ -75,7 +79,7 @@ def mk_ssh_config(workdir: Path, ssh_config: str, config: Config):
         time.sleep(1)
 
     # copy the file to workdir
-    print("cert found, begin uploading")
+    print_log("cert found, begin uploading")
     shutil.move(os.path.join(os.path.expanduser("~"),"Downloads",f"{keyname}-cert.pub"), os.path.join(workdir,f"{keyname}-cert.pub"))
 
     # use ssh-keygen to query the certificate for the valid principals and add them to the ssh config
@@ -122,7 +126,7 @@ def private_browser(url):
             ], shell=True, check=True)
             return
         except subprocess.CalledProcessError:
-            print("MSEdge not found")
+            print_log("MSEdge not found")
 
         
         # Default chrome installation path
@@ -131,20 +135,20 @@ def private_browser(url):
         if web_bool:
             return
         else:
-            print("Chrome not found, searching x86")
+            print_log("Chrome not found, searching x86")
 
         chrome_path_x86 = 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe %s --incognito'
         web_bool = webbrowser.get(chrome_path_x86).open_new(url)
         if web_bool:
             return
         else:
-            print("Chrome not found")    
+            print_log("Chrome not found")    
 
-        print("Supported web browsers not found, please install either MSEdge or Chrome")
+        print_log("Supported web browsers not found, please install either MSEdge or Chrome", "error")
         input("Press ENTER to exit.")
         sys.exit(1)
     else:
-        print("ScpWrap currently only supports windows")
+        print_log("ScpWrap currently only supports windows", "error")
         input("Press ENTER to exit.")
         sys.exit(1)
 
@@ -256,7 +260,6 @@ def copy(dir: str, config: Config, workdir: str, sshconfig: str):
     progress.update()
 
     # Estimate speed
-    # estimated_speed = 50000  # in KB/s
     st = speedtest.Speedtest()
     estimated_speed = st.upload() # bits/s
 
@@ -278,14 +281,24 @@ def copy(dir: str, config: Config, workdir: str, sshconfig: str):
     root.withdraw()
     result = tkinter.Toplevel(root)
     result.title("Estimated Transfer Time")
-    msg = (
-        f"Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"Total size: {(total_size / 1024):.2f} KB\n"
-        f"Estimated speed: {(estimated_speed / 1024 / 8):.2f} KB/s\n"
-        f"Estimated completion: {completion_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"Estimated duration: {int(estimated_time_sec // 60)} min {int(estimated_time_sec % 60)} sec"
-    )
+    if total_size:
+        msg = (
+            f"Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Total size: {(total_size / 1024):.2f} KB\n"
+            f"Estimated speed: {(estimated_speed / 1024 / 8):.2f} KB/s\n"
+            f"Estimated completion: {completion_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Estimated duration: {int(estimated_time_sec // 60)} min {int(estimated_time_sec % 60)} sec"
+        )
+    else:
+        msg = (
+            f"Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Total size: N/A KB\n"
+            f"Estimated speed: {(estimated_speed / 1024 / 8):.2f} KB/s\n"
+            f"Estimated completion: N/A\n"
+            f"Estimated duration: N/A"
+        )
     label = tkinter.Label(result, text=msg)
+    print_log(msg)
     label.pack(padx=20, pady=20)
     result.update()
 
@@ -316,7 +329,7 @@ def use_sftp(srcdir: PathLike, remote_dir: PathLike, remote_host: str, sshconfig
         proc.wait()
     
 def verify(remote_host, username, key_filename, dir, remotebase, delete_agreement):
-    print("begin verifying")
+    print_log("begin verifying")
     # Connect to the remote
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy()) # no known_hosts error
@@ -335,37 +348,54 @@ def verify(remote_host, username, key_filename, dir, remotebase, delete_agreemen
                 stat_remote = sftp.stat(f"{remotebase}/{Path(dir).name}/{relpath}")
                 assert abs(stat_local.st_mtime - stat_remote.st_mtime) < 1
                 assert stat_local.st_size == stat_remote.st_size
-                print(f"verified {path}")
+                print_log(f"verified {path}")
 
                 if delete_agreement:
                     os.remove(path)
-                    print(f"deleted {path}")
+                    print_log(f"deleted {path}")
                 
             except AssertionError:
-                print(f"{path} mtime or size does not match")
+                print_log(f"{path} mtime or size does not match", "error")
             except FileNotFoundError:
-                print(f"{path} not found")
+                print_log(f"{path} not found", "error")
         
         for d in dirs:
             if delete_agreement:
                 try:
                     path = f"{root}/{d}"
                     os.rmdir(path)
-                    print(f"Deleted {path}")
+                    print_log(f"Deleted {path}")
                 except OSError:
-                    print(f"{path} is not empty")
+                    print_log(f"{path} is not empty", "error")
 
 def cleanup(workdir: str):
     # Remove the temporary directory
     if os.path.exists(workdir):
         shutil.rmtree(workdir)
-        print(f"Removed temporary directory: {workdir}")
+        print_log(f"Removed temporary directory: {workdir}")
     else:
-        print(f"Directory {workdir} does not exist.")
+        print_log(f"Directory {workdir} does not exist.", "error")
     return
+
+def print_log(message, level="info"):
+    print(message)
+
+    # Get the method from the attributes and call
+    getattr(logging, level)(message)
 
 def main():
     try:
+        # Create a log at the exe level rather than the pycrucible level
+        logging_file = str(Path(__file__).resolve().parent.parent / "scpwrap.log")
+        logging.basicConfig(
+            format="%(asctime)s - %(levelname)s - %(message)s", 
+            level=logging.INFO,
+            handlers=[TimedRotatingFileHandler(logging_file, when="W0", interval=1, backupCount=5)]
+            )
+        
+        print_log("============================================================================")
+        print_log(f"ScpWrap {VERSION}")
+
         # Make workdir
         workdir = tempfile.mkdtemp()
         if not os.path.exists(workdir):
@@ -403,10 +433,13 @@ def main():
 
         cleanup(workdir)
 
+        end_time = datetime.datetime.now()
+        print_log(f"Process finished: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
         input("Press ENTER to exit.")
 
     except Exception as e:
-        print(e)
+        print_log(e, "error")
         input("Press ENTER to exit.")
 
 
