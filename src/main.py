@@ -20,7 +20,7 @@ from tkinter import filedialog
 from typing import Tuple
 from urllib.parse import urlencode
 
-VERSION = "v1.4"
+VERSION = "v1.5"
 
 class Config:
     localbase: str
@@ -283,6 +283,7 @@ def copy(dir: str, config: Config, workdir: str, sshconfig: str):
     result.title("Estimated Transfer Time")
     if total_size:
         msg = (
+            f"Path: {dir}\n"
             f"Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"Total size: {(total_size / 1024):.2f} KB\n"
             f"Estimated speed: {(estimated_speed / 1024 / 8):.2f} KB/s\n"
@@ -291,6 +292,7 @@ def copy(dir: str, config: Config, workdir: str, sshconfig: str):
         )
     else:
         msg = (
+            f"Path: {dir}\n"
             f"Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"Total size: N/A KB\n"
             f"Estimated speed: {(estimated_speed / 1024 / 8):.2f} KB/s\n"
@@ -312,7 +314,7 @@ def copy(dir: str, config: Config, workdir: str, sshconfig: str):
     # Close the progress dialog
     use_sftp(srcdir, Path(remote_dir), config.remote_host, sshconfig)
     root.destroy()
-    return
+    return start_time
 
 def use_sftp(srcdir: PathLike, remote_dir: PathLike, remote_host: str, sshconfig: str):
     script = f'cd {remote_dir}\nmkdir "{srcdir.name}"\ncd "{srcdir.name}"\nput -rp .\nexit\n'
@@ -428,13 +430,13 @@ def main():
         (dir, ssh_config, ssh_details, delete_agreement) = setup(config.localbase, workdir, config)
 
         # Copy files
-        copy(dir, config=config, workdir=workdir, sshconfig=ssh_config)
+        start_time = copy(dir, config=config, workdir=workdir, sshconfig=ssh_config)
         verify(*ssh_details, dir, config.remotebase, delete_agreement)
 
         cleanup(workdir)
 
         end_time = datetime.datetime.now()
-        print_log(f"Process finished: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print_log(f"Process started: {end_time.strftime('%Y-%m-%d %H:%M:%S')}\nProcess finished: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
         input("Press ENTER to exit.")
 
