@@ -20,7 +20,7 @@ from tkinter import filedialog
 from typing import Tuple
 from urllib.parse import urlencode
 
-VERSION = "v1.5"
+VERSION = "v1.6"
 
 class Config:
     localbase: str
@@ -197,11 +197,16 @@ def setup(localbase: str, workdir: str, config: Config) -> Tuple[str, str]:
 
     root.mainloop()
 
+    if delete_agreement.get():
+        print_log("User agreed to delete the dataset after upload")
+    else:
+        print_log("User did not agree to delete the dataset after upload")
+
     # Make SSH Config
     ssh_config = os.path.join(os.path.expanduser(workdir), "ssh.cfg")
     ssh_details = mk_ssh_config(Path(os.path.expanduser(workdir)), ssh_config, config)
     
-    return (directory, ssh_config, ssh_details, delete_agreement)
+    return (directory, ssh_config, ssh_details, delete_agreement.get())
 
 
 def get_dir_size_windows(path):
@@ -330,7 +335,7 @@ def use_sftp(srcdir: PathLike, remote_dir: PathLike, remote_host: str, sshconfig
         proc.stdin.close()
         proc.wait()
     
-def verify(remote_host, username, key_filename, dir, remotebase, delete_agreement):
+def verify(remote_host, username, key_filename, dir, remotebase, delete_agreement_bool):
     print_log("begin verifying")
     # Connect to the remote
     client = paramiko.SSHClient()
@@ -352,7 +357,7 @@ def verify(remote_host, username, key_filename, dir, remotebase, delete_agreemen
                 assert stat_local.st_size == stat_remote.st_size
                 print_log(f"verified {path}")
 
-                if delete_agreement:
+                if delete_agreement_bool:
                     os.remove(path)
                     print_log(f"deleted {path}")
                 
@@ -362,7 +367,7 @@ def verify(remote_host, username, key_filename, dir, remotebase, delete_agreemen
                 print_log(f"{path} not found", "error")
         
         for d in dirs:
-            if delete_agreement:
+            if delete_agreement_bool:
                 try:
                     path = f"{root}/{d}"
                     os.rmdir(path)
@@ -427,11 +432,11 @@ def main():
         })
 
         # Setup ssh config
-        (dir, ssh_config, ssh_details, delete_agreement) = setup(config.localbase, workdir, config)
+        (dir, ssh_config, ssh_details, delete_agreement_bool) = setup(config.localbase, workdir, config)
 
         # Copy files
         start_time = copy(dir, config=config, workdir=workdir, sshconfig=ssh_config)
-        verify(*ssh_details, dir, config.remotebase, delete_agreement)
+        verify(*ssh_details, dir, config.remotebase, delete_agreement_bool)
 
         cleanup(workdir)
 
