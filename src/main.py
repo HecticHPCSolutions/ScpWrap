@@ -3,6 +3,7 @@ import logging
 import os
 import paramiko
 import posixpath
+import requests
 import shutil
 import speedtest
 import subprocess
@@ -12,6 +13,7 @@ import time
 import tkinter
 import webbrowser
 import yaml
+
 from logging.handlers import TimedRotatingFileHandler
 from os import PathLike
 from pathlib import Path
@@ -20,7 +22,7 @@ from tkinter import filedialog
 from typing import Tuple
 from urllib.parse import urlencode
 
-VERSION = "v1.6"
+VERSION = "v1.7"
 
 class Config:
     localbase: str
@@ -390,6 +392,16 @@ def print_log(message, level="info"):
     # Get the method from the attributes and call
     getattr(logging, level)(message)
 
+def check_version():
+    # Check version
+    resp = requests.get(
+        'https://api.github.com/repos/HecticHPCSolutions/ScpWrap/tags')
+    cloud_version = resp.json()[0]["name"]
+    
+    if cloud_version != VERSION:
+        print_log(f"Please update to latest SCPWrap version: {cloud_version}")
+        tkinter.messagebox.showwarning("Version mismatch!", f"Local version detected: {VERSION}\nPlease update to latest SCPWrap version: {cloud_version}")
+
 def main():
     try:
         # Create a log at the exe level rather than the pycrucible level
@@ -402,6 +414,9 @@ def main():
         
         print_log("============================================================================")
         print_log(f"ScpWrap {VERSION}")
+
+        # Check version
+        check_version()
 
         # Make workdir
         workdir = tempfile.mkdtemp()
