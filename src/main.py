@@ -246,14 +246,6 @@ def _dir_metrics_single_pass(path: Path) -> Tuple[int, int]:
     return total_size, total_files
 
 
-def get_dir_size_windows(path: Path) -> Tuple[int, int]:
-    return _dir_metrics_single_pass(Path(path))
-
-
-def get_dir_size_linux(path: Path) -> Tuple[int, int]:
-    return _dir_metrics_single_pass(Path(path))
-
-
 def get_size(path: Path) -> Tuple[int, int]:
     """
     Get directory metrics.
@@ -261,10 +253,8 @@ def get_size(path: Path) -> Tuple[int, int]:
     :param path: Path to the directory.
     :return: (total size in bytes, file count)
     """
-    if os.name == 'nt':  # Windows
-        return get_dir_size_windows(path)
-    else:  # Linux or other OS
-        return get_dir_size_linux(path)
+    return _dir_metrics_single_pass(Path(path))
+
 
 
 def _archive_suffix(arctype: str) -> str:
