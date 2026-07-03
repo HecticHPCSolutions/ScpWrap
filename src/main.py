@@ -1,7 +1,8 @@
 import datetime
+import hashlib
+import json
 import logging
 import os
-import paramiko
 import posixpath
 import requests
 import shutil
@@ -13,14 +14,20 @@ import time
 import tkinter
 import webbrowser
 import yaml
+from typing import Literal
 
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from logging.handlers import TimedRotatingFileHandler
-from os import PathLike
 from pathlib import Path
 from tkinter import ttk
 from tkinter import filedialog
 from typing import Tuple
 from urllib.parse import urlencode
+
+from sftp_client import connect_sftp
+from stream_archive import create_archive
+from verify_archive import compare_stats, dir_stats, remote_dir_stats, tar_stats
 
 VERSION = "v1.7"
 
@@ -39,7 +46,7 @@ class Config:
         return f"Config(localbase={self.localbase}, remote_host={self.remote_host}, remotebase={self.remotebase}, sshauthz={self.sshauthz})"
     
 
-def mk_ssh_config(workdir: Path, ssh_config: str, config: Config):
+def mk_ssh_config(workdir: Path, ssh_config: str, config: Config) -> Tuple[str,str,str]:
     # Use ssh-keygen to generate a new key in workdir
     keyname = "id_ed25519"
     keytype = "ed25519"
@@ -89,7 +96,7 @@ def mk_ssh_config(workdir: Path, ssh_config: str, config: Config):
 
     # parse the output
     lines = p.stdout.splitlines()
-    principals = []
+    principals: list[str] = []
     inblock = False
     for line in lines:
         if 'Principals' in line:
@@ -172,7 +179,7 @@ def private_browser(url):
 
 #     return Config(**configdata)
 
-def setup(localbase: str, workdir: str, config: Config) -> Tuple[str, str]:
+def setup(localbase: str, workdir: str, config: Config) -> Tuple[str, str, Tuple[str,str,str], bool]:
     initialdir = os.path.expanduser(localbase)
     root = tkinter.Tk()
     root.withdraw()  # Hide the main window
@@ -220,16 +227,16 @@ def get_dir_size_windows(path):
     result = subprocess.check_output(cmd, universal_newlines=True)
     return int(result.strip()) if result.strip().isdigit() else 0
 
-def get_dir_size_linux(path):
-    cmd = [
+def get_dir_size_linux(path: Path):
+    cmd: list[str] = [
         "du",
         "-sb",
-        path
+        f"{path}"
     ]
     result = subprocess.check_output(cmd, universal_newlines=True)
     return int(result.split()[0]) if result.strip().isdigit() else 0
 
-def get_size(path: PathLike) -> int:
+def get_size(path: Path) -> int:
     """
     Get the size of a directory in bytes.
     :param path: Path to the directory.
@@ -241,7 +248,85 @@ def get_size(path: PathLike) -> int:
         return get_dir_size_linux(path)
 
 
-def copy(dir: str, config: Config, workdir: str, sshconfig: str):
+def _archive_suffix(arctype: str) -> str:
+    if arctype == "tar.gz":
+        return "tar.gz"
+    if arctype == "tar.bz2":
+        return "tar.bz2"
+    if arctype == "tar.xz":
+        return "tar.xz"
+    raise ValueError(f"Unsupported archive type: {arctype}")
+
+
+def _archive_read_mode(arctype: str) -> Literal['r', 'r:gz', 'r:bz2', 'r:xz']:
+    if arctype == "tar.gz":
+        return "r:gz"
+    if arctype == "tar.bz2":
+        return "r:bz2"
+    if arctype == "tar.xz":
+        return "r:xz"
+    raise ValueError(f"Unsupported archive type: {arctype}")
+
+
+def _write_stats_artifacts(output_dir: Path, base_name: str, local_stats: dict, remote_stats: dict, summary):
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    source_stats_file = output_path / f"{base_name}.source.stats.json"
+    remote_stats_file = output_path / f"{base_name}.remote.stats.json"
+    summary_file = output_path / f"{base_name}.summary.json"
+
+    with open(source_stats_file, "w", encoding="utf-8") as f:
+        json.dump({path: asdict(file_stats) for path, file_stats in local_stats.items()}, f, indent=2, sort_keys=True)
+    with open(remote_stats_file, "w", encoding="utf-8") as f:
+        json.dump({path: asdict(file_stats) for path, file_stats in remote_stats.items()}, f, indent=2, sort_keys=True)
+    with open(summary_file, "w", encoding="utf-8") as f:
+        json.dump(asdict(summary), f, indent=2, sort_keys=True)
+
+    print_log(f"Wrote source file stats with checksums to {source_stats_file}")
+    print_log(f"Wrote remote file stats with checksums to {remote_stats_file}")
+    print_log(f"Wrote archive verification summary to {summary_file}")
+
+
+def _archive_with_stats(srcdir: Path, remote_dir: str, remote_host: str, sshconfig: str, archive_type: str):
+    suffix = _archive_suffix(archive_type)
+    remote_archive = posixpath.join(remote_dir, f"{srcdir.name}.{suffix}")
+
+    create_archive(
+        config=sshconfig,
+        host=remote_host,
+        archive=remote_archive,
+        source=str(srcdir),
+        arctype=archive_type,
+    )
+    return remote_archive
+
+
+def _archive_stats_from_remote(remote_archive: str, remote_host: str, sshconfig: str, archive_type: str):
+    hasher = hashlib.md5
+    sftp = connect_sftp(sshconfig, remote_host)
+    try:
+        with sftp.file(remote_archive, "r") as remote_file:
+            archive_stats = tar_stats(remote_file, hasher=hasher, mode=_archive_read_mode(archive_type))
+    finally:
+        sftp.close()
+    return archive_stats
+
+
+def _remote_dir_with_stats(srcdir: Path, remote_dir: str, remote_host: str, sshconfig: str):
+    remote_uploaded_dir = posixpath.join(remote_dir, srcdir.name)
+    hasher = hashlib.md5
+
+    sftp = connect_sftp(sshconfig, remote_host)
+    try:
+        stats = remote_dir_stats(sftp, remote_uploaded_dir, hasher=hasher)
+    finally:
+        sftp.close()
+
+    return remote_uploaded_dir, stats
+
+
+def copy(dir: str, config: Config, sshconfig: str, transfer_mode: str = "files", archive_type: str = "tar.gz"):
     # Get relative path from srcdir
     srcdir = Path(os.path.expanduser(dir))
     if not srcdir.is_dir():
@@ -319,12 +404,48 @@ def copy(dir: str, config: Config, workdir: str, sshconfig: str):
     #    hash_algorithm=hash_algorithm,
     #)
     # Close the progress dialog
-    use_sftp(srcdir, Path(remote_dir), config.remote_host, sshconfig)
-    root.destroy()
-    return start_time
+    if transfer_mode == "files":
+        use_sftp(srcdir, Path(remote_dir), config.remote_host, sshconfig)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            local_stats_future = executor.submit(dir_stats, str(srcdir), hashlib.md5)
+            remote_stats_future = executor.submit(
+                _remote_dir_with_stats,
+                srcdir,
+                remote_dir,
+                config.remote_host,
+                sshconfig,
+            )
+            local_stats = local_stats_future.result()
+            remote_uploaded_dir, remote_stats = remote_stats_future.result()
+        print_log(f"Directory uploaded at {remote_uploaded_dir}")
+    elif transfer_mode == "archive":
+        archive_path = _archive_with_stats(
+            srcdir=srcdir,
+            remote_dir=remote_dir,
+            remote_host=config.remote_host,
+            sshconfig=sshconfig,
+            archive_type=archive_type,
+        )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            local_stats_future = executor.submit(dir_stats, str(srcdir), hashlib.md5)
+            remote_stats_future = executor.submit(
+                _archive_stats_from_remote,
+                archive_path,
+                config.remote_host,
+                sshconfig,
+                archive_type,
+            )
+            local_stats = local_stats_future.result()
+            remote_stats = remote_stats_future.result()
+        print_log(f"Archive created at {archive_path}")
+    else:
+        raise ValueError("transfer_mode must be either 'files' or 'archive'")
 
-def use_sftp(srcdir: PathLike, remote_dir: PathLike, remote_host: str, sshconfig: str):
-    script = f'cd {remote_dir}\nmkdir "{srcdir.name}"\ncd "{srcdir.name}"\nput -rp .\nexit\n'
+    root.destroy()
+    return start_time, local_stats, remote_stats
+
+def use_sftp(srcdir: Path, remote_dir: Path, remote_host: str, sshconfig: str):
+    script = f'cd {remote_dir}\nmkdir "{srcdir}"\ncd "{srcdir}"\nput -rp .\nexit\n'
     with subprocess.Popen(
         ["sftp",  "-b", "-", "-F", f"{sshconfig}", remote_host],
         stdin=subprocess.PIPE,
@@ -337,45 +458,43 @@ def use_sftp(srcdir: PathLike, remote_dir: PathLike, remote_host: str, sshconfig
         proc.stdin.close()
         proc.wait()
     
-def verify(remote_host, username, key_filename, dir, remotebase, delete_agreement_bool):
+def verify(remote_stats: dict, local_stats: dict, dir: str, delete_agreement_bool: bool, artifact_label: str):
     print_log("begin verifying")
-    # Connect to the remote
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy()) # no known_hosts error
-    client.connect(remote_host, username=username, key_filename=key_filename)
+    summary = compare_stats(remote_stats, local_stats)
 
-    sftp = paramiko.SFTPClient.from_transport(client.get_transport())
-    
-    # Iterate through local directory
-    for root, dirs, files in os.walk(dir, topdown=False):
-        for f in files:
-            path = f"{root}/{f}"
-            stat_local = os.stat(path)
-            relpath = Path(os.path.relpath(path, dir)).as_posix()
-            # Check size and mtimes match
-            try:
-                stat_remote = sftp.stat(f"{remotebase}/{Path(dir).name}/{relpath}")
-                assert abs(stat_local.st_mtime - stat_remote.st_mtime) < 1
-                assert stat_local.st_size == stat_remote.st_size
-                print_log(f"verified {path}")
+    artifact_dir = Path(__file__).resolve().parent.parent / "archive_stats"
+    _write_stats_artifacts(artifact_dir, artifact_label, local_stats, remote_stats, summary)
 
-                if delete_agreement_bool:
-                    os.remove(path)
-                    print_log(f"deleted {path}")
-                
-            except AssertionError:
-                print_log(f"{path} mtime or size does not match", "error")
-            except FileNotFoundError:
-                print_log(f"{path} not found", "error")
-        
-        for d in dirs:
-            if delete_agreement_bool:
+    has_differences = (
+        bool(summary.files_in_archive_only)
+        or bool(summary.files_in_source_only)
+        or bool(summary.files_with_size_diff)
+        or bool(summary.files_with_mtime_diff)
+        or bool(summary.files_with_checksum_diff)
+    )
+
+    if has_differences:
+        print_log("Verification detected differences between local source and remote transfer content", "error")
+        return False
+
+    print_log("Verification passed: local source and remote transfer content match")
+
+    if delete_agreement_bool:
+        for root, dirs, files in os.walk(dir, topdown=False):
+            for f in files:
+                path = os.path.join(root, f)
+                os.remove(path)
+                print_log(f"deleted {path}")
+
+            for d in dirs:
+                path = os.path.join(root, d)
                 try:
-                    path = f"{root}/{d}"
                     os.rmdir(path)
                     print_log(f"Deleted {path}")
                 except OSError:
                     print_log(f"{path} is not empty", "error")
+
+    return True
 
 def cleanup(workdir: str):
     # Remove the temporary directory
@@ -447,11 +566,21 @@ def main():
         })
 
         # Setup ssh config
-        (dir, ssh_config, ssh_details, delete_agreement_bool) = setup(config.localbase, workdir, config)
+        (dir, ssh_config, _, delete_agreement_bool) = setup(config.localbase, workdir, config)
 
-        # Copy files
-        start_time = copy(dir, config=config, workdir=workdir, sshconfig=ssh_config)
-        verify(*ssh_details, dir, config.remotebase, delete_agreement_bool)
+        transfer_mode = os.environ.get("TRANSFER_MODE", "files").strip().lower()
+        archive_type = os.environ.get("ARCHIVE_TYPE", "tar.gz").strip().lower()
+
+        # Copy files or create remote archive depending on transfer mode
+        start_time, local_stats, remote_stats = copy(
+            dir,
+            config=config,
+            sshconfig=ssh_config,
+            transfer_mode=transfer_mode,
+            archive_type=archive_type,
+        )
+
+        verify(remote_stats, local_stats, dir, delete_agreement_bool, Path(dir).name)
 
         cleanup(workdir)
 
