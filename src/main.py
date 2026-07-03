@@ -6,7 +6,6 @@ import os
 import posixpath
 import requests
 import shutil
-import speedtest
 import subprocess
 import sys
 import tempfile
@@ -14,7 +13,7 @@ import time
 import tkinter
 import webbrowser
 import yaml
-from typing import Literal
+from typing import Callable, Literal, Optional
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
@@ -218,29 +217,49 @@ def setup(localbase: str, workdir: str, config: Config) -> Tuple[str, str, Tuple
     return (directory, ssh_config, ssh_details, delete_agreement.get())
 
 
-def get_dir_size_windows(path):
-    cmd = [
-        "powershell",
-        "-Command",
-        f"(Get-ChildItem '{path}' -Recurse | Measure-Object -Property Length -Sum).Sum"
-    ]
-    result = subprocess.check_output(cmd, universal_newlines=True)
-    return int(result.strip()) if result.strip().isdigit() else 0
-
-def get_dir_size_linux(path: Path):
-    cmd: list[str] = [
-        "du",
-        "-sb",
-        f"{path}"
-    ]
-    result = subprocess.check_output(cmd, universal_newlines=True)
-    return int(result.split()[0]) if result.strip().isdigit() else 0
-
-def get_size(path: Path) -> int:
+def _dir_metrics_single_pass(path: Path) -> Tuple[int, int]:
     """
-    Get the size of a directory in bytes.
+    Return total size in bytes and file count using a single filesystem walk.
+    """
+    total_size = 0
+    total_files = 0
+    stack: list[Path] = [Path(path)]
+
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            total_files += 1
+                            total_size += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        # Skip entries we cannot stat/read and continue scanning.
+                        continue
+        except OSError:
+            # Skip directories we cannot traverse and continue scanning.
+            continue
+
+    return total_size, total_files
+
+
+def get_dir_size_windows(path: Path) -> Tuple[int, int]:
+    return _dir_metrics_single_pass(Path(path))
+
+
+def get_dir_size_linux(path: Path) -> Tuple[int, int]:
+    return _dir_metrics_single_pass(Path(path))
+
+
+def get_size(path: Path) -> Tuple[int, int]:
+    """
+    Get directory metrics.
+
     :param path: Path to the directory.
-    :return: Size in bytes.
+    :return: (total size in bytes, file count)
     """
     if os.name == 'nt':  # Windows
         return get_dir_size_windows(path)
@@ -288,7 +307,14 @@ def _write_stats_artifacts(output_dir: Path, base_name: str, local_stats: dict, 
     print_log(f"Wrote archive verification summary to {summary_file}")
 
 
-def _archive_with_stats(srcdir: Path, remote_dir: str, remote_host: str, sshconfig: str, archive_type: str):
+def _archive(
+    srcdir: Path,
+    remote_dir: str,
+    remote_host: str,
+    sshconfig: str,
+    archive_type: str,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+):
     suffix = _archive_suffix(archive_type)
     remote_archive = posixpath.join(remote_dir, f"{srcdir.name}.{suffix}")
 
@@ -298,6 +324,7 @@ def _archive_with_stats(srcdir: Path, remote_dir: str, remote_host: str, sshconf
         archive=remote_archive,
         source=str(srcdir),
         arctype=archive_type,
+        progress_callback=progress_callback,
     )
     return remote_archive
 
@@ -342,59 +369,152 @@ def copy(dir: str, config: Config, sshconfig: str, transfer_mode: str = "files",
     #output_manifest = Path(os.path.join(os.path.expanduser(workdir),"manifest.yaml"))
     #hash_algorithm = "sha256"
 
-    # Prompt user with estimated time to completion
+    def _fmt_bytes(num_bytes: float) -> str:
+        units = ["B", "KB", "MB", "GB", "TB"]
+        value = float(max(num_bytes, 0))
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                return f"{value:.2f} {unit}"
+            value /= 1024
+        return f"{value:.2f} TB"
+
+    def _fmt_duration(seconds: Optional[float]) -> str:
+        if seconds is None:
+            return "N/A"
+        total_seconds = max(int(seconds), 0)
+        mins, secs = divmod(total_seconds, 60)
+        hours, mins = divmod(mins, 60)
+        if hours:
+            return f"{hours} hr {mins} min {secs} sec"
+        return f"{mins} min {secs} sec"
+
     root = tkinter.Tk()
     root.withdraw()
-    progress = tkinter.Toplevel(root)
-    progress.title("Estimating Time")
-    label = tkinter.Label(progress, text="Estimating transfer time, please wait...")
-    label.pack(padx=20, pady=20)
-    progress.update()
+    # Fast-start: compute directory totals in the background while transfer begins immediately.
+    metrics_executor = ThreadPoolExecutor(max_workers=1)
+    metrics_future = metrics_executor.submit(get_size, Path(dir))
 
-    # Estimate speed
-    st = speedtest.Speedtest()
-    estimated_speed = st.upload() # bits/s
-
-    # Calculate directory size
-    total_size = get_size(Path(dir))
-    total_size_bits = total_size * 8  # convert bytes to bits
-    estimated_time_sec = total_size_bits / estimated_speed if estimated_speed else 0
-
-    # Close UI objects
-    progress.destroy()
-    root.destroy()
-
-    # Calculate completion time
     start_time = datetime.datetime.now()
-    completion_time = start_time + datetime.timedelta(seconds=estimated_time_sec)
+    start_monotonic = time.monotonic()
 
-    # Show dialog with start and estimated completion time
-    root = tkinter.Tk()
-    root.withdraw()
+    total_size: Optional[int] = None
+    total_files: Optional[int] = None
+    metrics_ready = False
+
+    progress_label_text = tkinter.StringVar()
     result = tkinter.Toplevel(root)
-    result.title("Estimated Transfer Time")
-    if total_size:
-        msg = (
-            f"Path: {dir}\n"
-            f"Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"Total size: {(total_size / 1024):.2f} KB\n"
-            f"Estimated speed: {(estimated_speed / 1024 / 8):.2f} KB/s\n"
-            f"Estimated completion: {completion_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"Estimated duration: {int(estimated_time_sec // 60)} min {int(estimated_time_sec % 60)} sec"
-        )
-    else:
-        msg = (
-            f"Path: {dir}\n"
-            f"Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"Total size: N/A KB\n"
-            f"Estimated speed: {(estimated_speed / 1024 / 8):.2f} KB/s\n"
-            f"Estimated completion: N/A\n"
-            f"Estimated duration: N/A"
-        )
-    label = tkinter.Label(result, text=msg)
-    print_log(msg)
+    result.title("Transfer Progress")
+    label = tkinter.Label(result, textvariable=progress_label_text, justify="left")
     label.pack(padx=20, pady=20)
+
+    last_sample_time = start_monotonic
+    last_sample_bytes = 0
+
+    def _hydrate_totals() -> None:
+        nonlocal total_size, total_files, metrics_ready
+        if metrics_ready:
+            return
+        if not metrics_future.done():
+            return
+        try:
+            total_size, total_files = metrics_future.result()
+            metrics_ready = True
+        except Exception as exc:
+            print_log(f"Failed to calculate directory metrics in background: {exc}", "error")
+            total_size, total_files = None, None
+            metrics_ready = True
+
+    def _build_progress_text(
+        bytes_written: int,
+        files_transferred: int,
+        avg_speed_bps: Optional[float],
+        inst_speed_bps: Optional[float],
+        elapsed_seconds: float,
+        eta_seconds: Optional[float],
+        completion_dt: Optional[datetime.datetime],
+    ) -> str:
+        if total_size and total_size > 0:
+            pct = min((bytes_written / total_size) * 100, 100.0)
+            size_line = f"Transferred: {_fmt_bytes(bytes_written)} / {_fmt_bytes(total_size)} ({pct:.1f}%)"
+        else:
+            size_line = f"Transferred: {_fmt_bytes(bytes_written)}"
+
+        total_size_text = _fmt_bytes(total_size) if total_size is not None else "Calculating..."
+        total_files_text = str(total_files) if total_files is not None else "Calculating..."
+        completion_text = completion_dt.strftime("%Y-%m-%d %H:%M:%S") if completion_dt else "N/A"
+
+        return (
+            f"Path: {dir}\n"
+            f"Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Total size: {total_size_text}\n"
+            f"Total files: {total_files_text}\n"
+            f"\n"
+            f"{size_line}\n"
+            f"Files transferred: {files_transferred}\n"
+            f"Current speed: {_fmt_bytes(avg_speed_bps) + '/s' if avg_speed_bps else 'N/A'}"
+            f" (instant: {_fmt_bytes(inst_speed_bps) + '/s' if inst_speed_bps else 'N/A'})\n"
+            f"Elapsed duration: {_fmt_duration(elapsed_seconds)}\n"
+            f"Projected completion: {completion_text}\n"
+            f"Remaining duration: {_fmt_duration(eta_seconds)}"
+        )
+
+    initial_msg = _build_progress_text(
+        bytes_written=0,
+        files_transferred=0,
+        avg_speed_bps=None,
+        inst_speed_bps=None,
+        elapsed_seconds=0,
+        eta_seconds=None,
+        completion_dt=None,
+    )
+    progress_label_text.set(initial_msg)
+    print_log(initial_msg)
     result.update()
+
+    def transfer_progress_callback(total_bytes_written: int, files_transferred: int) -> None:
+        nonlocal last_sample_time, last_sample_bytes
+        _hydrate_totals()
+        now = time.monotonic()
+        elapsed_seconds = max(now - start_monotonic, 0.000001)
+
+        delta_time = max(now - last_sample_time, 0.000001)
+        delta_bytes = max(total_bytes_written - last_sample_bytes, 0)
+        inst_speed_bps = delta_bytes / delta_time if delta_bytes > 0 else None
+
+        avg_speed_bps = total_bytes_written / elapsed_seconds if total_bytes_written > 0 else None
+        if total_size and avg_speed_bps and avg_speed_bps > 0:
+            eta_seconds = max((total_size - total_bytes_written) / avg_speed_bps, 0)
+            completion_dt = datetime.datetime.now() + datetime.timedelta(seconds=eta_seconds)
+        else:
+            eta_seconds = None
+            completion_dt = None
+
+        progress_label_text.set(
+            _build_progress_text(
+                bytes_written=total_bytes_written,
+                files_transferred=files_transferred,
+                avg_speed_bps=avg_speed_bps,
+                inst_speed_bps=inst_speed_bps,
+                elapsed_seconds=elapsed_seconds,
+                eta_seconds=eta_seconds,
+                completion_dt=completion_dt,
+            )
+        )
+        result.update_idletasks()
+        result.update()
+
+        last_sample_time = now
+        last_sample_bytes = total_bytes_written
+
+    def set_verifying_status() -> None:
+        verify_start_time = datetime.datetime.now()
+        _hydrate_totals()
+        progress_label_text.set(
+            "Copy complete, verifying ...\n"
+            f"Verification start time: {verify_start_time.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        result.update_idletasks()
+        result.update()
 
     #scp_with_manifest(
     #    input_directory=srcdir,
@@ -405,7 +525,14 @@ def copy(dir: str, config: Config, sshconfig: str, transfer_mode: str = "files",
     #)
     # Close the progress dialog
     if transfer_mode == "files":
-        use_sftp(srcdir, Path(remote_dir), config.remote_host, sshconfig)
+        use_sftp(
+            srcdir,
+            Path(remote_dir),
+            config.remote_host,
+            sshconfig,
+            progress_callback=transfer_progress_callback,
+        )
+        set_verifying_status()
         with ThreadPoolExecutor(max_workers=2) as executor:
             local_stats_future = executor.submit(dir_stats, str(srcdir), hashlib.md5)
             remote_stats_future = executor.submit(
@@ -419,13 +546,15 @@ def copy(dir: str, config: Config, sshconfig: str, transfer_mode: str = "files",
             remote_uploaded_dir, remote_stats = remote_stats_future.result()
         print_log(f"Directory uploaded at {remote_uploaded_dir}")
     elif transfer_mode == "archive":
-        archive_path = _archive_with_stats(
+        archive_path = _archive(
             srcdir=srcdir,
             remote_dir=remote_dir,
             remote_host=config.remote_host,
             sshconfig=sshconfig,
             archive_type=archive_type,
+            progress_callback=transfer_progress_callback,
         )
+        set_verifying_status()
         with ThreadPoolExecutor(max_workers=2) as executor:
             local_stats_future = executor.submit(dir_stats, str(srcdir), hashlib.md5)
             remote_stats_future = executor.submit(
@@ -441,22 +570,86 @@ def copy(dir: str, config: Config, sshconfig: str, transfer_mode: str = "files",
     else:
         raise ValueError("transfer_mode must be either 'files' or 'archive'")
 
+    metrics_executor.shutdown(wait=False)
+    result.destroy()
     root.destroy()
     return start_time, local_stats, remote_stats
 
-def use_sftp(srcdir: Path, remote_dir: Path, remote_host: str, sshconfig: str):
-    script = f'cd {remote_dir}\nmkdir "{srcdir}"\ncd "{srcdir}"\nput -rp .\nexit\n'
-    with subprocess.Popen(
-        ["sftp",  "-b", "-", "-F", f"{sshconfig}", remote_host],
-        stdin=subprocess.PIPE,
-        text=True,
-        cwd=srcdir
-    ) as proc:
-        if proc.stdin is None:
-            raise ValueError("Failed to open stdin for SFTP process.")
-        proc.stdin.write(script)
-        proc.stdin.close()
-        proc.wait()
+def _ensure_remote_dir(sftp, remote_path: str):
+    normalized = posixpath.normpath(remote_path)
+    if normalized in ("", "."):
+        return
+
+    parts = normalized.strip("/").split("/")
+    if normalized.startswith("/"):
+        current = "/"
+    else:
+        current = ""
+
+    for part in parts:
+        if not part:
+            continue
+        if current in ("", "/"):
+            next_path = f"/{part}" if current == "/" else part
+        else:
+            next_path = posixpath.join(current, part)
+        try:
+            sftp.mkdir(next_path)
+        except OSError:
+            # Directory may already exist.
+            pass
+        current = next_path
+
+
+def use_sftp(
+    srcdir: Path,
+    remote_dir: Path,
+    remote_host: str,
+    sshconfig: str,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+):
+    remote_root = posixpath.join(str(remote_dir), srcdir.name)
+    total_bytes_written = 0
+    total_files_transferred = 0
+    chunk_size = 1024 * 1024
+
+    sftp = connect_sftp(sshconfig, remote_host)
+    try:
+        _ensure_remote_dir(sftp, remote_root)
+
+        for root, dirs, files in os.walk(srcdir):
+            rel_root = os.path.relpath(root, srcdir)
+            if rel_root == ".":
+                remote_current = remote_root
+            else:
+                remote_current = posixpath.join(remote_root, rel_root.replace(os.sep, "/"))
+
+            _ensure_remote_dir(sftp, remote_current)
+
+            for d in dirs:
+                remote_subdir = posixpath.join(remote_current, d)
+                _ensure_remote_dir(sftp, remote_subdir)
+
+            for filename in files:
+                local_file = Path(root) / filename
+                remote_file = posixpath.join(remote_current, filename)
+
+                with local_file.open("rb") as src_f:
+                    with sftp.file(remote_file, "wb") as dst_f:
+                        while True:
+                            chunk = src_f.read(chunk_size)
+                            if not chunk:
+                                break
+                            dst_f.write(chunk)
+                            total_bytes_written += len(chunk)
+                            if progress_callback is not None:
+                                progress_callback(total_bytes_written, total_files_transferred)
+
+                total_files_transferred += 1
+                if progress_callback is not None:
+                    progress_callback(total_bytes_written, total_files_transferred)
+    finally:
+        sftp.close()
     
 def verify(remote_stats: dict, local_stats: dict, dir: str, delete_agreement_bool: bool, artifact_label: str):
     print_log("begin verifying")

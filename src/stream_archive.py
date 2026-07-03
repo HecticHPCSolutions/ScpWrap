@@ -6,10 +6,11 @@ import os
 import sys
 import json
 from dataclasses import asdict
+from typing import Callable
 
 import paramiko
 import tarfile
-from typing import Literal, Union
+from typing import Literal, Optional, Union
 from verify_archive import tar_stats
 from sftp_client import connect_sftp
 
@@ -22,7 +23,12 @@ def iter_files(path):
             yield os.path.join(dirpath, f)
 
 
-def write_tar(f: paramiko.SFTPFile, localpath: str, mode: Literal['w', 'w:gz', 'w:bz2', 'w:xz'] = 'w:gz'):
+def write_tar(
+    f: paramiko.SFTPFile,
+    localpath: str,
+    mode: Literal['w', 'w:gz', 'w:bz2', 'w:xz'] = 'w:gz',
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+):
     """
     Create a tar archive from localpath and write it directly to the file handle.
     
@@ -36,13 +42,26 @@ def write_tar(f: paramiko.SFTPFile, localpath: str, mode: Literal['w', 'w:gz', '
               'w:xz' - xz compression
     """
     print(f'Creating a tar archive from {localpath} with mode {mode}')
+    total_bytes_written = 0
+    total_files_written = 0
     
     with tarfile.open(fileobj=f, mode=mode) as tf:
         toplevel = os.path.basename(os.path.normpath(localpath))
         for file_path in iter_files(localpath):
+            if os.path.isfile(file_path):
+                file_size = os.stat(file_path).st_size
+            else:
+                file_size = 0
+
             # Use the basename of the path to set the arcname
             arcname = os.path.join(toplevel, os.path.relpath(file_path, localpath))
             tf.add(file_path, arcname=arcname)
+
+            total_bytes_written += file_size
+            if os.path.isfile(file_path):
+                total_files_written += 1
+            if progress_callback is not None:
+                progress_callback(total_bytes_written, total_files_written)
 
 
 def infer_arctype_from_archive(archive: str) -> str:
@@ -59,18 +78,25 @@ def infer_arctype_from_archive(archive: str) -> str:
     )
 
 
-def create_archive(config,host,archive,source,arctype):
+def create_archive(
+    config,
+    host,
+    archive,
+    source,
+    arctype,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+):
     try:
         resolved_arctype = arctype or infer_arctype_from_archive(archive)
         # Connect to SFTP
         sftp = connect_sftp(config, host)
         with sftp.file(archive,'w') as f:
             if resolved_arctype == "tar.gz":
-                write_tar(f,source, mode='w:gz')
+                write_tar(f,source, mode='w:gz', progress_callback=progress_callback)
             elif resolved_arctype == "tar.bz2":
-                write_tar(f,source, mode='w:bz2')
+                write_tar(f,source, mode='w:bz2', progress_callback=progress_callback)
             elif resolved_arctype == "tar.xz":
-                write_tar(f,source, mode='w:xz')
+                write_tar(f,source, mode='w:xz', progress_callback=progress_callback)
             else:
                 raise ValueError(
                     f"Unsupported arctype: {resolved_arctype}. "
