@@ -9,10 +9,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tkinter
 import webbrowser
-import yaml
 from typing import Callable, Literal, Optional
 
 from concurrent.futures import ThreadPoolExecutor
@@ -21,11 +21,12 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from tkinter import ttk
 from tkinter import filedialog
+from tkinter import messagebox
 from typing import Tuple
 from urllib.parse import urlencode
 
 from sftp_client import connect_sftp
-from stream_archive import create_archive
+from stream_archive import create_archive, CancelledError
 from verify_archive import compare_stats, dir_stats, remote_dir_stats, tar_stats
 
 VERSION = "v1.7"
@@ -43,7 +44,41 @@ class Config:
 
     def __str__(self):
         return f"Config(localbase={self.localbase}, remote_host={self.remote_host}, remotebase={self.remotebase}, sshauthz={self.sshauthz})"
-    
+
+
+def _downloads_directory() -> str:
+    """Return the user's Downloads directory in a cross-platform way."""
+    home = Path.home()
+    downloads = home / "Downloads"
+    if downloads.exists():
+        return str(downloads)
+
+    if os.name == "nt":
+        try:
+            import ctypes
+            csidl_downloads = 0x374  # CSIDL_DOWNLOADS
+            buf = ctypes.create_unicode_buffer(260)
+            ctypes.windll.shell32.SHGetFolderPathW(None, csidl_downloads, None, 0, buf)
+            return buf.value or str(downloads)
+        except Exception:
+            return str(downloads)
+
+    # Fallback for Linux: try xdg-user-dir
+    try:
+        result = subprocess.run(
+            ["xdg-user-dir", "DOWNLOAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        path = result.stdout.strip()
+        if path:
+            return path
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pass
+
+    return str(downloads)
+
 
 def mk_ssh_config(workdir: Path, ssh_config: str, config: Config) -> Tuple[str,str,str]:
     # Use ssh-keygen to generate a new key in workdir
@@ -52,24 +87,28 @@ def mk_ssh_config(workdir: Path, ssh_config: str, config: Config) -> Tuple[str,s
 
     sshauthz_host = config.sshauthz.split("?")[0]
     ca = config.sshauthz.split("?")[1].split("=")[1]
-    ssh_key_path = os.path.join(workdir, keyname)
-    
-    # Remove the key if it already exists
-    if os.path.exists(ssh_key_path):
-        os.remove(ssh_key_path)
-    if os.path.exists(ssh_key_path + ".pub"):
-        os.remove(ssh_key_path + ".pub")
-    if os.path.exists(ssh_key_path + "-cert.pub"):
-        os.remove(ssh_key_path + "-cert.pub")
-    if os.path.exists(os.path.expanduser(f'~/Downloads/{keyname}-cert.pub')):
-        os.remove(os.path.expanduser(f'~/Downloads/{keyname}-cert.pub'))
+    ssh_key_path = str(Path(workdir) / keyname)
+    downloads_dir = _downloads_directory()
 
-    subprocess.run(["ssh-keygen", "-t",keytype, "-f", ssh_key_path, "-N", ""])
+    # Remove the key if it already exists
+    key_path = Path(ssh_key_path)
+    if key_path.exists():
+        key_path.unlink()
+    if key_path.with_suffix(".pub").exists():
+        key_path.with_suffix(".pub").unlink()
+    cert_path = Path(f"{ssh_key_path}-cert.pub")
+    if cert_path.exists():
+        cert_path.unlink()
+    cert_download_path = os.path.join(downloads_dir, f"{keyname}-cert.pub")
+    if os.path.exists(cert_download_path):
+        os.remove(cert_download_path)
+
+    subprocess.run(["ssh-keygen", "-t", keytype, "-f", ssh_key_path, "-N", ""])
 
     # read the public key
     qs = {}
-    with open(ssh_key_path + ".pub", "r") as f:
-        pubkey =f.read().strip()
+    with open(f"{ssh_key_path}.pub", "r") as f:
+        pubkey = f.read().strip()
     qs['saveas'] = f"{keyname}-cert.pub"
     qs['pubkey'] = pubkey
     qs['ca'] = ca
@@ -81,17 +120,23 @@ def mk_ssh_config(workdir: Path, ssh_config: str, config: Config) -> Tuple[str,s
     # open the url in a browser
     private_browser(url)
 
-    # Wait for the file ~/Downloads/{keyname}-cert.pub to be created
-    while not os.path.exists(os.path.join(os.path.expanduser("~"),"Downloads",f"{keyname}-cert.pub")):
+    # Wait for the downloaded cert to arrive
+    cert_download_path = os.path.join(downloads_dir, f"{keyname}-cert.pub")
+    while not os.path.exists(cert_download_path):
         print('waiting for the cert to arrive')
         time.sleep(1)
 
     # copy the file to workdir
     print_log("cert found, begin uploading")
-    shutil.move(os.path.join(os.path.expanduser("~"),"Downloads",f"{keyname}-cert.pub"), os.path.join(workdir,f"{keyname}-cert.pub"))
+    shutil.move(cert_download_path, str(Path(workdir) / f"{keyname}-cert.pub"))
 
     # use ssh-keygen to query the certificate for the valid principals and add them to the ssh config
-    p = subprocess.run(["ssh-keygen", "-L", "-f", os.path.join(workdir,f"{keyname}-cert.pub")], check=True, capture_output=True, text=True)
+    p = subprocess.run(
+        ["ssh-keygen", "-L", "-f", str(Path(workdir) / f"{keyname}-cert.pub")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
     # parse the output
     lines = p.stdout.splitlines()
@@ -105,25 +150,26 @@ def mk_ssh_config(workdir: Path, ssh_config: str, config: Config) -> Tuple[str,s
             inblock = False
             continue
         if inblock:
-            principals.append(line.strip())    
+            principals.append(line.strip())
 
     # create the ssh config file
-    with open(ssh_config, "w") as f:    
+    cert_file = Path(workdir) / f"{keyname}-cert.pub"
+    with open(ssh_config, "w") as f:
         f.write(f"Host {config.remote_host}\n")
         f.write(f"    HostName {config.remote_host}\n")
         f.write(f"    User {principals[0]}\n")
         f.write(f"    IdentityFile {ssh_key_path}\n")
-        f.write(f"    CertificateFile {os.path.join(workdir,f'{keyname}-cert.pub')}\n")
+        f.write(f"    CertificateFile {cert_file}\n")
         f.write(f"    IdentitiesOnly yes\n")
         f.write(f"    StrictHostKeyChecking no\n")
         f.write(f"    ControlMaster auto\n")
         f.write(f"    ControlPersist 10m\n")
         f.write(f"    LogLevel ERROR\n")
-    
+
     return (config.remote_host, principals[0], ssh_key_path)
 
 
-def private_browser(url):    
+def private_browser(url):
     if os.name == 'nt':  # Windows
         try:
             subprocess.run([
@@ -136,7 +182,7 @@ def private_browser(url):
         except subprocess.CalledProcessError:
             print_log("MSEdge not found")
 
-        
+
         # Default chrome installation path
         chrome_path = 'C:/Program Files/Google/Chrome/Application/chrome.exe %s --incognito'
         web_bool = webbrowser.get(chrome_path).open_new(url)
@@ -150,11 +196,17 @@ def private_browser(url):
         if web_bool:
             return
         else:
-            print_log("Chrome not found")    
+            print_log("Chrome not found")
 
         print_log("Supported web browsers not found, please install either MSEdge or Chrome", "error")
         input("Press ENTER to exit.")
         sys.exit(1)
+    elif os.name == 'posix':
+        try:
+            subprocess.run(['xdg-open',url])
+            return
+        except subprocess.CalledProcessError:
+            print_log('xdg open failed')
     else:
         print_log("ScpWrap currently only supports windows", "error")
         input("Press ENTER to exit.")
@@ -179,7 +231,7 @@ def private_browser(url):
 #     return Config(**configdata)
 
 def setup(localbase: str, workdir: str, config: Config) -> Tuple[str, str, Tuple[str,str,str], bool]:
-    initialdir = os.path.expanduser(localbase)
+    initialdir = str(Path(localbase).expanduser())
     root = tkinter.Tk()
     root.withdraw()  # Hide the main window
 
@@ -211,9 +263,10 @@ def setup(localbase: str, workdir: str, config: Config) -> Tuple[str, str, Tuple
         print_log("User did not agree to delete the dataset after upload")
 
     # Make SSH Config
-    ssh_config = os.path.join(os.path.expanduser(workdir), "ssh.cfg")
-    ssh_details = mk_ssh_config(Path(os.path.expanduser(workdir)), ssh_config, config)
-    
+    workdir_path = Path(workdir).expanduser()
+    ssh_config = str(workdir_path / "ssh.cfg")
+    ssh_details = mk_ssh_config(workdir_path, ssh_config, config)
+
     return (directory, ssh_config, ssh_details, delete_agreement.get())
 
 
@@ -304,9 +357,13 @@ def _archive(
     sshconfig: str,
     archive_type: str,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    cancelled: Optional[threading.Event] = None,
 ):
     suffix = _archive_suffix(archive_type)
-    remote_archive = posixpath.join(remote_dir, f"{srcdir.name}.{suffix}")
+    remote_archive = posixpath.join(
+        remote_dir.replace(os.sep, '/').replace('\\', '/'),
+        f"{srcdir.name}.{suffix}",
+    )
 
     create_archive(
         config=sshconfig,
@@ -315,28 +372,54 @@ def _archive(
         source=str(srcdir),
         arctype=archive_type,
         progress_callback=progress_callback,
+        cancelled=cancelled,
     )
     return remote_archive
 
 
-def _archive_stats_from_remote(remote_archive: str, remote_host: str, sshconfig: str, archive_type: str):
+def _archive_stats_from_remote(
+    remote_archive: str,
+    remote_host: str,
+    sshconfig: str,
+    archive_type: str,
+    progress_callback: Optional[Callable[[int], None]] = None,
+):
     hasher = hashlib.md5
     sftp = connect_sftp(sshconfig, remote_host)
     try:
         with sftp.file(remote_archive, "r") as remote_file:
-            archive_stats = tar_stats(remote_file, hasher=hasher, mode=_archive_read_mode(archive_type))
+            archive_stats = tar_stats(
+                remote_file,
+                hasher=hasher,
+                mode=_archive_read_mode(archive_type),
+                progress_callback=progress_callback,
+            )
     finally:
         sftp.close()
     return archive_stats
 
 
-def _remote_dir_with_stats(srcdir: Path, remote_dir: str, remote_host: str, sshconfig: str):
-    remote_uploaded_dir = posixpath.join(remote_dir, srcdir.name)
+def _remote_dir_with_stats(
+    srcdir: Path,
+    remote_dir: str,
+    remote_host: str,
+    sshconfig: str,
+    progress_callback: Optional[Callable[[int], None]] = None,
+):
+    remote_uploaded_dir = posixpath.join(
+        remote_dir.replace(os.sep, '/').replace('\\', '/'),
+        srcdir.name,
+    )
     hasher = hashlib.md5
 
     sftp = connect_sftp(sshconfig, remote_host)
     try:
-        stats = remote_dir_stats(sftp, remote_uploaded_dir, hasher=hasher)
+        stats = remote_dir_stats(
+            sftp,
+            remote_uploaded_dir,
+            hasher=hasher,
+            progress_callback=progress_callback,
+        )
     finally:
         sftp.close()
 
@@ -345,7 +428,7 @@ def _remote_dir_with_stats(srcdir: Path, remote_dir: str, remote_host: str, sshc
 
 def copy(dir: str, config: Config, sshconfig: str, transfer_mode: str = "files", archive_type: str = "tar.gz"):
     # Get relative path from srcdir
-    srcdir = Path(os.path.expanduser(dir))
+    srcdir = Path(dir).expanduser()
     if not srcdir.is_dir():
         raise ValueError(f"Directory {srcdir} does not exist.")
     # rel_path = os.path.relpath(dir, config.localbase)
@@ -394,8 +477,22 @@ def copy(dir: str, config: Config, sshconfig: str, transfer_mode: str = "files",
     progress_label_text = tkinter.StringVar()
     result = tkinter.Toplevel(root)
     result.title("Transfer Progress")
-    label = tkinter.Label(result, textvariable=progress_label_text, justify="left")
+    label = tkinter.Label(result, textvariable=progress_label_text, justify="left", anchor="w", width=90)
     label.pack(padx=20, pady=20)
+
+    # Cancellation support
+    cancelled = threading.Event()
+
+    def on_cancel():
+        if messagebox.askyesno("Cancel Transfer", "Are you sure you want to cancel this transfer?\n\nThis will stop the transfer immediately and any partially transferred files may be left on the remote server."):
+            cancelled.set()
+            result.destroy()
+            print_log("Transfer cancelled by user.", "warning")
+            # Clean up metrics executor
+            metrics_executor.shutdown(wait=False)
+
+    cancel_button = ttk.Button(result, text="Cancel", command=on_cancel)
+    cancel_button.pack(pady=10)
 
     last_sample_time = start_monotonic
     last_sample_bytes = 0
@@ -448,6 +545,11 @@ def copy(dir: str, config: Config, sshconfig: str, transfer_mode: str = "files",
             f"Remaining duration: {_fmt_duration(eta_seconds)}"
         )
 
+    # Track if transfer was cancelled for proper return handling
+    transfer_cancelled = False
+    local_stats = None
+    remote_stats = None
+
     initial_msg = _build_progress_text(
         bytes_written=0,
         files_transferred=0,
@@ -459,6 +561,13 @@ def copy(dir: str, config: Config, sshconfig: str, transfer_mode: str = "files",
     )
     progress_label_text.set(initial_msg)
     print_log(initial_msg)
+    result.update_idletasks()
+    locked_width = result.winfo_width()
+    locked_height = result.winfo_height()
+    result.geometry(f"{locked_width}x{locked_height}")
+    result.minsize(locked_width, locked_height)
+    result.maxsize(locked_width, locked_height)
+    result.resizable(False, False)
     result.update()
 
     def transfer_progress_callback(total_bytes_written: int, files_transferred: int) -> None:
@@ -497,7 +606,9 @@ def copy(dir: str, config: Config, sshconfig: str, transfer_mode: str = "files",
         last_sample_bytes = total_bytes_written
 
     def set_verifying_status() -> None:
-        verify_start_time = datetime.datetime.now()
+        nonlocal verify_start_time
+        if verify_start_time is None:
+            verify_start_time = datetime.datetime.now()
         _hydrate_totals()
         progress_label_text.set(
             "Copy complete, verifying ...\n"
@@ -505,6 +616,43 @@ def copy(dir: str, config: Config, sshconfig: str, transfer_mode: str = "files",
         )
         result.update_idletasks()
         result.update()
+
+    verify_start_time: Optional[datetime.datetime] = None
+    verification_progress_lock = threading.Lock()
+    local_files_verified = 0
+    remote_files_verified = 0
+
+    def local_verify_progress_callback(processed_files: int) -> None:
+        nonlocal local_files_verified
+        with verification_progress_lock:
+            local_files_verified = processed_files
+
+    def remote_verify_progress_callback(processed_files: int) -> None:
+        nonlocal remote_files_verified
+        with verification_progress_lock:
+            remote_files_verified = processed_files
+
+    def _update_verification_progress_until_done(local_future, remote_future) -> None:
+        while not (local_future.done() and remote_future.done()):
+            with verification_progress_lock:
+                local_count = local_files_verified
+                remote_count = remote_files_verified
+
+            _hydrate_totals()
+            total_files_text = str(total_files) if total_files is not None else "Calculating..."
+            if verify_start_time is None:
+                set_verifying_status()
+
+            progress_label_text.set(
+                "Copy complete, verifying ...\n"
+                f"Verification start time: {verify_start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Expected files: {total_files_text}\n"
+                f"Local files processed: {local_count}\n"
+                f"Remote files processed: {remote_count}"
+            )
+            result.update_idletasks()
+            result.update()
+            time.sleep(0.1)
 
     #scp_with_manifest(
     #    input_directory=srcdir,
@@ -514,53 +662,75 @@ def copy(dir: str, config: Config, sshconfig: str, transfer_mode: str = "files",
     #    hash_algorithm=hash_algorithm,
     #)
     # Close the progress dialog
-    if transfer_mode == "files":
-        use_sftp(
-            srcdir,
-            Path(remote_dir),
-            config.remote_host,
-            sshconfig,
-            progress_callback=transfer_progress_callback,
-        )
-        set_verifying_status()
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            local_stats_future = executor.submit(dir_stats, str(srcdir), hashlib.md5)
-            remote_stats_future = executor.submit(
-                _remote_dir_with_stats,
+    try:
+        if transfer_mode == "files":
+            use_sftp(
                 srcdir,
-                remote_dir,
+                Path(remote_dir),
                 config.remote_host,
                 sshconfig,
+                progress_callback=transfer_progress_callback,
+                cancelled=cancelled,
             )
-            local_stats = local_stats_future.result()
-            remote_uploaded_dir, remote_stats = remote_stats_future.result()
-        print_log(f"Directory uploaded at {remote_uploaded_dir}")
-    elif transfer_mode == "archive":
-        archive_path = _archive(
-            srcdir=srcdir,
-            remote_dir=remote_dir,
-            remote_host=config.remote_host,
-            sshconfig=sshconfig,
-            archive_type=archive_type,
-            progress_callback=transfer_progress_callback,
-        )
-        set_verifying_status()
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            local_stats_future = executor.submit(dir_stats, str(srcdir), hashlib.md5)
-            remote_stats_future = executor.submit(
-                _archive_stats_from_remote,
-                archive_path,
-                config.remote_host,
-                sshconfig,
-                archive_type,
+            set_verifying_status()
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                local_stats_future = executor.submit(
+                    dir_stats,
+                    str(srcdir),
+                    hashlib.md5,
+                    local_verify_progress_callback,
+                )
+                remote_stats_future = executor.submit(
+                    _remote_dir_with_stats,
+                    srcdir,
+                    remote_dir,
+                    config.remote_host,
+                    sshconfig,
+                    remote_verify_progress_callback,
+                )
+                _update_verification_progress_until_done(local_stats_future, remote_stats_future)
+                local_stats = local_stats_future.result()
+                remote_uploaded_dir, remote_stats = remote_stats_future.result()
+            print_log(f"Directory uploaded at {remote_uploaded_dir}")
+        elif transfer_mode == "archive":
+            archive_path = _archive(
+                srcdir=srcdir,
+                remote_dir=remote_dir,
+                remote_host=config.remote_host,
+                sshconfig=sshconfig,
+                archive_type=archive_type,
+                progress_callback=transfer_progress_callback,
+                cancelled=cancelled,
             )
-            local_stats = local_stats_future.result()
-            remote_stats = remote_stats_future.result()
-        print_log(f"Archive created at {archive_path}")
-    else:
-        raise ValueError("transfer_mode must be either 'files' or 'archive'")
+            set_verifying_status()
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                local_stats_future = executor.submit(
+                    dir_stats,
+                    str(srcdir),
+                    hashlib.md5,
+                    local_verify_progress_callback,
+                )
+                remote_stats_future = executor.submit(
+                    _archive_stats_from_remote,
+                    archive_path,
+                    config.remote_host,
+                    sshconfig,
+                    archive_type,
+                    remote_verify_progress_callback,
+                )
+                _update_verification_progress_until_done(local_stats_future, remote_stats_future)
+                local_stats = local_stats_future.result()
+                remote_stats = remote_stats_future.result()
+            print_log(f"Archive created at {archive_path}")
+        else:
+            raise ValueError("transfer_mode must be either 'files' or 'archive'")
+    except CancelledError:
+        transfer_cancelled = True
+        print_log("Transfer was cancelled.", "warning")
 
     metrics_executor.shutdown(wait=False)
+    if transfer_cancelled:
+        return None
     result.destroy()
     root.destroy()
     return start_time, local_stats, remote_stats
@@ -597,8 +767,12 @@ def use_sftp(
     remote_host: str,
     sshconfig: str,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    cancelled: Optional[threading.Event] = None,
 ):
-    remote_root = posixpath.join(str(remote_dir), srcdir.name)
+    remote_root = posixpath.join(
+        str(remote_dir).replace(os.sep, '/').replace('\\', '/'),
+        srcdir.name,
+    )
     total_bytes_written = 0
     total_files_transferred = 0
     chunk_size = 1024 * 1024
@@ -612,7 +786,9 @@ def use_sftp(
             if rel_root == ".":
                 remote_current = remote_root
             else:
-                remote_current = posixpath.join(remote_root, rel_root.replace(os.sep, "/"))
+                remote_current = posixpath.join(
+                    remote_root, rel_root.replace(os.sep, '/').replace('\\', '/')
+                )
 
             _ensure_remote_dir(sftp, remote_current)
 
@@ -621,6 +797,8 @@ def use_sftp(
                 _ensure_remote_dir(sftp, remote_subdir)
 
             for filename in files:
+                if cancelled is not None and cancelled.is_set():
+                    raise CancelledError("Transfer cancelled by user")
                 local_file = Path(root) / filename
                 remote_file = posixpath.join(remote_current, filename)
 
@@ -640,7 +818,7 @@ def use_sftp(
                     progress_callback(total_bytes_written, total_files_transferred)
     finally:
         sftp.close()
-    
+
 def verify(remote_stats: dict, local_stats: dict, dir: str, delete_agreement_bool: bool, artifact_label: str):
     print_log("begin verifying")
     summary = compare_stats(remote_stats, local_stats)
@@ -665,14 +843,14 @@ def verify(remote_stats: dict, local_stats: dict, dir: str, delete_agreement_boo
     if delete_agreement_bool:
         for root, dirs, files in os.walk(dir, topdown=False):
             for f in files:
-                path = os.path.join(root, f)
-                os.remove(path)
+                path = Path(root) / f
+                path.unlink()
                 print_log(f"deleted {path}")
 
             for d in dirs:
-                path = os.path.join(root, d)
+                path = Path(root) / d
                 try:
-                    os.rmdir(path)
+                    path.rmdir()
                     print_log(f"Deleted {path}")
                 except OSError:
                     print_log(f"{path} is not empty", "error")
@@ -681,8 +859,9 @@ def verify(remote_stats: dict, local_stats: dict, dir: str, delete_agreement_boo
 
 def cleanup(workdir: str):
     # Remove the temporary directory
-    if os.path.exists(workdir):
-        shutil.rmtree(workdir)
+    workdir_path = Path(workdir)
+    if workdir_path.exists():
+        shutil.rmtree(workdir_path)
         print_log(f"Removed temporary directory: {workdir}")
     else:
         print_log(f"Directory {workdir} does not exist.", "error")
@@ -699,21 +878,21 @@ def check_version():
     resp = requests.get(
         'https://api.github.com/repos/HecticHPCSolutions/ScpWrap/tags')
     cloud_version = resp.json()[0]["name"]
-    
+
     if cloud_version != VERSION:
         print_log(f"Please update to latest SCPWrap version: {cloud_version}")
         tkinter.messagebox.showwarning("Version mismatch!", f"Local version detected: {VERSION}\nPlease update to latest SCPWrap version: {cloud_version}")
 
 def main():
-    try:
+    # try:
         # Create a log at the exe level rather than the pycrucible level
         logging_file = str(Path(__file__).resolve().parent.parent / "scpwrap.log")
         logging.basicConfig(
-            format="%(asctime)s - %(levelname)s - %(message)s", 
+            format="%(asctime)s - %(levelname)s - %(message)s",
             level=logging.INFO,
             handlers=[TimedRotatingFileHandler(logging_file, when="W0", interval=1, backupCount=5)]
             )
-        
+
         print_log("============================================================================")
         print_log(f"ScpWrap {VERSION}")
 
@@ -722,8 +901,7 @@ def main():
 
         # Make workdir
         workdir = tempfile.mkdtemp()
-        if not os.path.exists(workdir):
-            os.makedirs(workdir)
+        Path(workdir).mkdir(parents=True, exist_ok=True)
 
         # Load config
         # try:
@@ -742,7 +920,7 @@ def main():
         # config = Config(**configdata)
         # config = get_config()
         config = Config(**{
-            'localbase': os.path.expanduser('~'),
+            'localbase': str(Path.home()),
             'remotebase': 'instrument_data',
             'remote_host': os.environ['REMOTE_HOST'],
             'sshauthz': os.environ['SSHAUTHZ']
@@ -755,7 +933,7 @@ def main():
         archive_type = os.environ.get("ARCHIVE_TYPE", "tar.gz").strip().lower()
 
         # Copy files or create remote archive depending on transfer mode
-        start_time, local_stats, remote_stats = copy(
+        copy_result = copy(
             dir,
             config=config,
             sshconfig=ssh_config,
@@ -763,6 +941,15 @@ def main():
             archive_type=archive_type,
         )
 
+        if copy_result is None:
+            # Transfer was cancelled
+            cleanup(workdir)
+            print_log("Transfer cancelled. Exiting.", "warning")
+            input("Press ENTER to exit.")
+            return
+
+        assert copy_result is not None
+        start_time, local_stats, remote_stats = copy_result
         verify(remote_stats, local_stats, dir, delete_agreement_bool, Path(dir).name)
 
         cleanup(workdir)
@@ -772,9 +959,9 @@ def main():
 
         input("Press ENTER to exit.")
 
-    except Exception as e:
-        print_log(e, "error")
-        input("Press ENTER to exit.")
+    # except Exception as e:
+    #     print_log(e, "error")
+    #     input("Press ENTER to exit.")
 
 
 

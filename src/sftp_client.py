@@ -24,7 +24,7 @@ def connect_sftp(config: str, host: str) -> paramiko.SFTPClient:
             hostname=hostname,
             port=port,
             username=username,
-            key_filename=','.join(key_filenames),
+            key_filename=key_filenames[0],
             allow_agent=True,
             look_for_keys=True,
         )

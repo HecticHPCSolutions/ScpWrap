@@ -1,8 +1,9 @@
 import paramiko
-from typing import Literal, Union
+from typing import Callable, Literal, Union
 import argparse
 import tarfile
 import os
+import posixpath
 import stat
 from dataclasses import dataclass, field
 from sftp_client import connect_sftp
@@ -27,7 +28,7 @@ class StatsSummary:
     matching_files: list[str] = field(default_factory=list)
 
 
-def dir_stats(path: str, hasher=None) -> dict[str, FileStats]:
+def dir_stats(path: str, hasher=None, progress_callback: Callable[[int], None] | None = None) -> dict[str, FileStats]:
     """
     Walk a directory and create FileStats objects for each file found.
     
@@ -38,10 +39,15 @@ def dir_stats(path: str, hasher=None) -> dict[str, FileStats]:
     :rtype: dict[str, FileStats]
     """
     files = {}
-    for root, dirs, filenames in os.walk(path):
+    processed_count = 0
+    base_path = os.path.abspath(os.path.normpath(path))
+    base_name = os.path.basename(base_path)
+    for root, dirs, filenames in os.walk(base_path):
         for filename in filenames:
             filepath = os.path.join(root, filename)
-            relative_path = os.path.relpath(filepath, os.path.normpath(os.path.join(path,'..')))
+            relative_path = os.path.relpath(filepath, base_path)
+            # Normalize to POSIX separators so keys are comparable across platforms
+            relative_path = base_name + '/' + relative_path.replace(os.sep, '/').replace('\\', '/')
             stat = os.stat(filepath)
             checksum = None
             
@@ -58,10 +64,19 @@ def dir_stats(path: str, hasher=None) -> dict[str, FileStats]:
                 size=stat.st_size,
                 hash=checksum
             )
+
+            processed_count += 1
+            if progress_callback is not None:
+                progress_callback(processed_count)
     return files
 
 
-def remote_dir_stats(sftp: paramiko.SFTPClient, path: str, hasher=None) -> dict[str, FileStats]:
+def remote_dir_stats(
+    sftp: paramiko.SFTPClient,
+    path: str,
+    hasher=None,
+    progress_callback: Callable[[int], None] | None = None,
+) -> dict[str, FileStats]:
     """
     Walk a remote directory over SFTP and create FileStats objects for each file found.
 
@@ -74,17 +89,21 @@ def remote_dir_stats(sftp: paramiko.SFTPClient, path: str, hasher=None) -> dict[
     :rtype: dict[str, FileStats]
     """
     files = {}
-    base_parent = os.path.normpath(os.path.join(path, '..'))
+    processed_count = 0
+    # Use posixpath for all remote SFTP path manipulation — SFTP always uses '/'
+    # regardless of the local OS.
+    base_parent = posixpath.normpath(posixpath.join(path, '..'))
 
     def _walk(remote_dir: str):
+        nonlocal processed_count
         for entry in sftp.listdir_attr(remote_dir):
-            remote_path = os.path.join(remote_dir, entry.filename)
+            remote_path = posixpath.join(remote_dir, entry.filename)
 
             if stat.S_ISDIR(entry.st_mode or 0):
                 _walk(remote_path)
                 continue
 
-            relative_path = os.path.relpath(remote_path, base_parent)
+            relative_path = posixpath.relpath(remote_path, base_parent)
             checksum = None
 
             if hasher is not None:
@@ -101,11 +120,20 @@ def remote_dir_stats(sftp: paramiko.SFTPClient, path: str, hasher=None) -> dict[
                 hash=checksum,
             )
 
+            processed_count += 1
+            if progress_callback is not None:
+                progress_callback(processed_count)
+
     _walk(path)
     return files
 
 from io import BufferedReader
-def tar_stats(f: Union[paramiko.SFTPFile, BufferedReader], hasher=None, mode: Literal['r', 'r:gz', 'r:bz2', 'r:xz'] = 'r:gz') -> dict[str, FileStats]:
+def tar_stats(
+    f: Union[paramiko.SFTPFile, BufferedReader],
+    hasher=None,
+    mode: Literal['r', 'r:gz', 'r:bz2', 'r:xz'] = 'r:gz',
+    progress_callback: Callable[[int], None] | None = None,
+) -> dict[str, FileStats]:
     """
     Read a tar file and compute a FileStats object for each member found.
     
@@ -118,9 +146,22 @@ def tar_stats(f: Union[paramiko.SFTPFile, BufferedReader], hasher=None, mode: Li
     :rtype: dict[str, FileStats]
     """
     files = {}
+    processed_count = 0
     with tarfile.open(fileobj=f, mode=mode) as tf:
-        for member in tf.getmembers():
+        members = tf.getmembers()
+        symlink_prefixes: tuple[str, ...] = tuple(
+            (member.name.rstrip("/") + "/")
+            for member in members
+            if member.issym() and member.name.rstrip("/")
+        )
+
+        for member in members:
             if member.isfile():
+                normalized_name = posixpath.normpath(member.name)
+                if any(normalized_name.startswith(prefix) for prefix in symlink_prefixes):
+                    # Keep parity with local stats policy: do not account for files below symlinked directories.
+                    continue
+
                 checksum = None
                 
                 if hasher is not None:
@@ -140,6 +181,10 @@ def tar_stats(f: Union[paramiko.SFTPFile, BufferedReader], hasher=None, mode: Li
                     size=member.size,
                     hash=checksum
                 )
+
+                processed_count += 1
+                if progress_callback is not None:
+                    progress_callback(processed_count)
     return files
 
 
@@ -252,7 +297,15 @@ def print_summary(summary: StatsSummary) -> str:
         return "identical"
 
 
-def verify_archive(config, host, archive, source, arctype, hash: Union[Literal['xxhash','md5'],None]=None):
+def verify_archive(
+    config,
+    host,
+    archive,
+    source,
+    arctype,
+    hash: Union[Literal['xxhash','md5'],None]=None,
+    progress: bool = False,
+):
     if hash is None:
         hasher = None
     if hash == 'md5':
@@ -261,13 +314,30 @@ def verify_archive(config, host, archive, source, arctype, hash: Union[Literal['
     if hash == 'xxhash':
         import xxhash
         hasher = xxhash.xxh64
+
+    def _archive_progress_callback(processed_files: int) -> None:
+        if progress:
+            print(f"\rArchive files processed: {processed_files}", end="", flush=True)
+
+    def _source_progress_callback(processed_files: int) -> None:
+        if progress:
+            print(f"\rSource files processed: {processed_files}", end="", flush=True)
+
     sftp = connect_sftp(config, host)
     with sftp.file(archive,'r') as f:
         if arctype == "tar.gz":
-            archive_stats = tar_stats(f,hasher=hasher, mode='r:gz')
+            archive_stats = tar_stats(f,hasher=hasher, mode='r:gz', progress_callback=_archive_progress_callback if progress else None)
         if arctype == "tar.bz2":
-            archive_stats = tar_stats(f,hasher=hasher, mode='r:bz2')
-    source_stats = dir_stats(source, hasher=hasher)
+            archive_stats = tar_stats(f,hasher=hasher, mode='r:bz2', progress_callback=_archive_progress_callback if progress else None)
+
+    if progress:
+        print()
+
+    source_stats = dir_stats(source, hasher=hasher, progress_callback=_source_progress_callback if progress else None)
+
+    if progress:
+        print()
+
     summary = compare_stats(archive_stats,source_stats)
     #print_summary(summary)
     return summary
@@ -310,10 +380,15 @@ def main():
         default="tar.gz",
         help="The type of archive to create"
     )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Print the number of files processed during archive verification",
+    )
     
     args = parser.parse_args()
 
-    verify_archive(args.config,args.host,args.archive,args.source,args.arctype)
+    verify_archive(args.config,args.host,args.archive,args.source,args.arctype, progress=args.progress)
 
 
 

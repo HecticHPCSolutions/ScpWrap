@@ -5,6 +5,8 @@ import argparse
 import os
 import sys
 import json
+import stat
+import threading
 from dataclasses import asdict
 from typing import Callable
 
@@ -15,10 +17,23 @@ from verify_archive import tar_stats
 from sftp_client import connect_sftp
 
 
+class CancelledError(Exception):
+    """Raised when a transfer is cancelled by the user."""
+    pass
+
+
 def iter_files(path):
-    for dirpath, _, files in os.walk(path, followlinks=True):
-        if not files:
+    for dirpath, dirs, files in os.walk(path, topdown=True, followlinks=False):
+        for dirname in list(dirs):
+            dir_full_path = os.path.join(dirpath, dirname)
+            if os.path.islink(dir_full_path):
+                # Keep the symlink entry in the archive, but do not descend into it.
+                yield dir_full_path
+                dirs.remove(dirname)
+
+        if not dirs and not files:
             yield dirpath  # Preserve empty directories
+
         for f in files:
             yield os.path.join(dirpath, f)
 
@@ -28,6 +43,7 @@ def write_tar(
     localpath: str,
     mode: Literal['w', 'w:gz', 'w:bz2', 'w:xz'] = 'w:gz',
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    cancelled: Optional[threading.Event] = None,
 ):
     """
     Create a tar archive from localpath and write it directly to the file handle.
@@ -46,19 +62,26 @@ def write_tar(
     total_files_written = 0
     
     with tarfile.open(fileobj=f, mode=mode) as tf:
-        toplevel = os.path.basename(os.path.normpath(localpath))
+        # Keep localpath as a native filesystem path for os.walk/iter_files.
+        # Tar archive member names always use POSIX-style separators, so arcname
+        # is converted to forward slashes separately.
+        localpath = os.path.normpath(localpath)
+        toplevel = os.path.basename(localpath)
         for file_path in iter_files(localpath):
-            if os.path.isfile(file_path):
-                file_size = os.stat(file_path).st_size
-            else:
-                file_size = 0
+            if cancelled is not None and cancelled.is_set():
+                raise CancelledError("Transfer cancelled by user")
+            file_size = 0
+            file_mode = os.lstat(file_path).st_mode
+            if stat.S_ISREG(file_mode):
+                file_size = os.path.getsize(file_path)
 
             # Use the basename of the path to set the arcname
             arcname = os.path.join(toplevel, os.path.relpath(file_path, localpath))
-            tf.add(file_path, arcname=arcname)
+            arcname = arcname.replace(os.sep, '/').replace('\\', '/')
+            tf.add(file_path, arcname=arcname, recursive=False)
 
             total_bytes_written += file_size
-            if os.path.isfile(file_path):
+            if stat.S_ISREG(file_mode):
                 total_files_written += 1
             if progress_callback is not None:
                 progress_callback(total_bytes_written, total_files_written)
@@ -85,25 +108,23 @@ def create_archive(
     source,
     arctype,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    cancelled: Optional[threading.Event] = None,
 ):
+    sftp = connect_sftp(config, host)
     try:
         resolved_arctype = arctype or infer_arctype_from_archive(archive)
-        # Connect to SFTP
-        sftp = connect_sftp(config, host)
         with sftp.file(archive,'w') as f:
             if resolved_arctype == "tar.gz":
-                write_tar(f,source, mode='w:gz', progress_callback=progress_callback)
+                write_tar(f,source, mode='w:gz', progress_callback=progress_callback, cancelled=cancelled)
             elif resolved_arctype == "tar.bz2":
-                write_tar(f,source, mode='w:bz2', progress_callback=progress_callback)
+                write_tar(f,source, mode='w:bz2', progress_callback=progress_callback, cancelled=cancelled)
             elif resolved_arctype == "tar.xz":
-                write_tar(f,source, mode='w:xz', progress_callback=progress_callback)
+                write_tar(f,source, mode='w:xz', progress_callback=progress_callback, cancelled=cancelled)
             else:
                 raise ValueError(
                     f"Unsupported arctype: {resolved_arctype}. "
                     "Supported values are: tar.gz, tar.bz2, tar.xz"
                 )
-        sftp.close()
-        
     except FileNotFoundError as e:
         print(f"Tried to open the sftp file object path {archive} but failed.")
         print(f"Error: {e}", file=sys.stderr)
@@ -114,9 +135,17 @@ def create_archive(
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        sftp.close()
 
-
-def stat_archive(config: Union[str,None], host: Union[str,None], archive: str, checksum: bool = False, output: Union[str,None] = None):
+def stat_archive(
+    config: Union[str, None],
+    host: Union[str, None],
+    archive: str,
+    checksum: bool = False,
+    output: Union[str, None] = None,
+    progress: bool = False,
+):
     hasher = None
     if checksum:
         import hashlib
@@ -134,16 +163,23 @@ def stat_archive(config: Union[str,None], host: Union[str,None], archive: str, c
     else:
         mode = 'r:xz'
 
+    def _progress_callback(processed_files: int) -> None:
+        if progress:
+            print(f"\rProcessed files: {processed_files}", end="", file=sys.stderr, flush=True)
+
     try:
 
         if config is None and host is None:
             with open(archive, 'rb') as f:
-                stats = tar_stats(f, hasher=hasher, mode=mode)
+                stats = tar_stats(f, hasher=hasher, mode=mode, progress_callback=_progress_callback if progress else None)
         elif config is not None and host is not None:
             sftp = connect_sftp(config, host)
             with sftp.file(archive, 'r') as f:
-                stats = tar_stats(f, hasher=hasher, mode=mode)
+                stats = tar_stats(f, hasher=hasher, mode=mode, progress_callback=_progress_callback if progress else None)
             sftp.close()
+
+        if progress:
+            print(file=sys.stderr)
 
         payload = {path: asdict(file_stats) for path, file_stats in stats.items()}
         text = json.dumps(payload, indent=2, sort_keys=True)
@@ -238,6 +274,11 @@ def main():
         default=None,
         help="Write stats JSON output to this local file",
     )
+    stat_parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Print the number of files processed while reading archive stats",
+    )
     
     args = parser.parse_args()
 
@@ -251,7 +292,7 @@ def main():
         if args.config is not None:
             args.config = os.path.expanduser(args.config)
         
-        stat_archive(args.config, args.host, args.archive, args.checksum, args.output)
+        stat_archive(args.config, args.host, args.archive, args.checksum, args.output, args.progress)
 
 
 
