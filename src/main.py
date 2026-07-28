@@ -814,6 +814,15 @@ def use_sftp(
                                 progress_callback(total_bytes_written, total_files_transferred)
 
                 total_files_transferred += 1
+
+                # Preserve permissions and mtime on the remote file
+                try:
+                    stat = local_file.stat()
+                    sftp.chmod(remote_file, stat.st_mode)
+                    sftp.utime(remote_file, (stat.st_atime, stat.st_mtime))
+                except OSError:
+                    pass  # Non-critical, don't fail the transfer
+
                 if progress_callback is not None:
                     progress_callback(total_bytes_written, total_files_transferred)
     finally:
