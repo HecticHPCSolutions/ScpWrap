@@ -128,6 +128,7 @@ def mk_ssh_config(workdir: Path, ssh_config: str, config: Config) -> Tuple[str,s
 
     # copy the file to workdir
     print_log("cert found, begin uploading")
+    time.sleep(1) # Wait for virus scan
     shutil.move(cert_download_path, str(Path(workdir) / f"{keyname}-cert.pub"))
 
     # use ssh-keygen to query the certificate for the valid principals and add them to the ssh config
@@ -816,9 +817,11 @@ def use_sftp(
                 total_files_transferred += 1
 
                 # Preserve permissions and mtime on the remote file
+                # Edit: Force 600 permissions
                 try:
                     stat = local_file.stat()
                     sftp.chmod(remote_file, stat.st_mode)
+                    # sftp.chmod(remote_file, 600)
                     sftp.utime(remote_file, (stat.st_atime, stat.st_mtime))
                 except OSError:
                     pass  # Non-critical, don't fail the transfer
@@ -893,7 +896,7 @@ def check_version():
         tkinter.messagebox.showwarning("Version mismatch!", f"Local version detected: {VERSION}\nPlease update to latest SCPWrap version: {cloud_version}")
 
 def main():
-    # try:
+    try:
         # Create a log at the exe level rather than the pycrucible level
         logging_file = str(Path(__file__).resolve().parent.parent / "scpwrap.log")
         logging.basicConfig(
@@ -958,7 +961,8 @@ def main():
             return
 
         assert copy_result is not None
-        start_time, local_stats, remote_stats = copy_result
+        start_time, local_stats, remote_stats = copy_result 
+        
         verify(remote_stats, local_stats, dir, delete_agreement_bool, Path(dir).name)
 
         cleanup(workdir)
@@ -968,9 +972,9 @@ def main():
 
         input("Press ENTER to exit.")
 
-    # except Exception as e:
-    #     print_log(e, "error")
-    #     input("Press ENTER to exit.")
+    except Exception as e:
+        print_log(e, "error")
+        input("Press ENTER to exit.")
 
 
 
