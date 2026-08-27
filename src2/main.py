@@ -12,7 +12,7 @@ from rclone import Rclone
 from ssh import SSH
 from tkinter import ttk
 from tkinter import filedialog
-from typing import Literal
+from typing import Callable, Literal
 from pathlib import Path
 
 VERSION="v2.0"
@@ -116,7 +116,7 @@ def prompt_delete_agreement() -> bool:
     return delete_agreement.get()
 
 
-def main():
+def main() -> None:
     create_log()
 
     print_log("============================================================================")
@@ -160,7 +160,7 @@ def main():
     print_log(f"Process started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\nProcess finished: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
 
-def main_wrapper(main):
+def main_wrapper(main: Callable[[], None]) -> None:
     try:
         main()
         input("Press ENTER to exit.")
