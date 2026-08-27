@@ -12,19 +12,19 @@ from rclone import Rclone
 from ssh import SSH
 from tkinter import ttk
 from tkinter import filedialog
-
+from typing import Literal
 from pathlib import Path
 
 VERSION="v2.0"
 
-def print_log(message, level="info"):
+def print_log(message: str, level: Literal["debug", "info", "warning", "error", "critical"] = "info") -> None:
     print(message)
 
     # Get the method from the attributes and call
     getattr(logging, level)(message)
 
 
-def create_log():
+def create_log() -> None:
     # Create a log at the exe level rather than the pycrucible level
     logging_file = str(Path(__file__).resolve().parent.parent / "scpwrap.log")
     logging.basicConfig(
@@ -35,7 +35,7 @@ def create_log():
     )
 
 
-def check_version():
+def check_version() -> None:
     # Check version
     resp = requests.get(
         'https://api.github.com/repos/HecticHPCSolutions/ScpWrap/tags')
@@ -59,16 +59,15 @@ class Config:
         self.local_base = local_base
         self.remote_host = remote_host
         self.remote_base = remote_base
-        # self.sshauthz = sshauthz
         self.transfer_mode = transfer_mode
         self.archive_type = archive_type
 
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"Config(local_base={self.local_base}, remote_host={self.remote_host}, remote_base={self.remote_base}, transfer_mode={self.transfer_mode}, archive_mode={self.archive_type})"
 
 
-def parse_config():
+def parse_config() -> Config:
     return Config(**{
         "local_base": str(Path.home()),
         "remote_base": 'instrument_data',
@@ -78,7 +77,7 @@ def parse_config():
     })
 
 
-def prompt_directory_select(local_base):
+def prompt_directory_select(local_base: str) -> str:
     initialdir = str(Path(local_base).expanduser())
     root = tkinter.Tk()
     root.withdraw()  # Hide the main window
@@ -95,7 +94,7 @@ def prompt_directory_select(local_base):
     return directory
 
 
-def prompt_delete_agreement():
+def prompt_delete_agreement() -> bool:
     root = tkinter.Tk()
     root.title("Delete after transfer?")
     root.geometry("350x100")
