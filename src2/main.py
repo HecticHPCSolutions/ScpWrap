@@ -70,7 +70,7 @@ class Config:
 def parse_config() -> Config:
     return Config(**{
         "local_base": str(Path.home()),
-        "remote_base": 'instrument_data',
+        "remote_base": 'merc-public-sftp/mhar0048',
         "remote_host": os.environ['REMOTE_HOST'],
         "transfer_mode": os.environ.get("TRANSFER_MODE", "files").strip().lower(),
         "archive_type": os.environ.get("ARCHIVE_TYPE", "tar.gz").strip().lower()
@@ -125,6 +125,7 @@ def main() -> None:
 
     print_log("Creating local temporary working directory...")
     work_dir = Path(tempfile.mkdtemp())
+    # work_dir = Path("C:/Users/mhar0048/Programming/ScpWrap/workdir")
     work_dir.mkdir(parents=True, exist_ok=True)
 
     print_log("Parsing config...")
@@ -140,8 +141,10 @@ def main() -> None:
 
     start_time = datetime.datetime.now()
 
+    print_log("Initialise rclone config...")
+    rclone = Rclone("vault", config.remote_host, ssh.user, ssh.key_path, work_dir / "rclone.conf", ssh.cert_path)
+
     print_log("Copying...")
-    rclone = Rclone("vault", config.remote_host, ssh.user, str(ssh.key_path), str(work_dir / "rclone.conf"), str(ssh.cert_path))
     rclone.copy(directory, config.remote_base)
 
     print_log("Final destination files:")
