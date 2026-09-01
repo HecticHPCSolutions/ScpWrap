@@ -2,12 +2,12 @@ import datetime
 import logging
 import os
 import requests
-import shutil
 import sys
 import tempfile
 import tkinter
 
 from logging.handlers import TimedRotatingFileHandler
+from machines import MACHINES
 from rclone import Rclone
 from ssh import SSH
 from tkinter import ttk
@@ -37,14 +37,12 @@ def create_log() -> None:
 
 def check_version() -> None:
     # Check version
-    resp = requests.get(
-        'https://api.github.com/repos/HecticHPCSolutions/ScpWrap/tags')
+    resp = requests.get('https://api.github.com/repos/HecticHPCSolutions/ScpWrap/tags')
     cloud_version = resp.json()[0]["name"]
 
     if cloud_version != VERSION:
         print_log(f"Please update to latest SCPWrap version: {cloud_version}")
-        tkinter.messagebox.showwarning(
-            "Version mismatch!", f"Local version detected: {VERSION}\nPlease update to latest SCPWrap version: {cloud_version}")
+        tkinter.messagebox.showwarning("Version mismatch!", f"Local version detected: {VERSION}\nPlease update to latest SCPWrap version: {cloud_version}")
 
 
 class Config:
@@ -70,7 +68,7 @@ class Config:
 def parse_config() -> Config:
     return Config(**{
         "local_base": str(Path.home()),
-        "remote_base": 'merc-public-sftp/mhar0048',
+        "remote_base": 'merc-public-sftp',
         "remote_host": os.environ['REMOTE_HOST'],
         "transfer_mode": os.environ.get("TRANSFER_MODE", "files").strip().lower(),
         "archive_type": os.environ.get("ARCHIVE_TYPE", "tar.gz").strip().lower()
@@ -125,7 +123,7 @@ def main() -> None:
 
     print_log("Creating local temporary working directory...")
     work_dir = Path(tempfile.mkdtemp())
-    # work_dir = Path("C:/Users/mhar0048/Programming/ScpWrap/workdir")
+    # work_dir = Path("C:\\Users\\mhar0048\\Programming\\ScpWrap\\workdir")
     work_dir.mkdir(parents=True, exist_ok=True)
 
     print_log("Parsing config...")
@@ -144,11 +142,16 @@ def main() -> None:
     print_log("Initialise rclone config...")
     rclone = Rclone("vault", config.remote_host, ssh.user, ssh.key_path, work_dir / "rclone.conf", ssh.cert_path)
 
-    print_log("Copying...")
-    rclone.copy(directory, config.remote_base)
+    print_log("Creating directories...")
+    remote_dir = f"{config.remote_base}/{ssh.user}/{MACHINES[os.environ['COMPUTERNAME']]}"
+    rclone.mkdir(remote_dir)
 
-    print_log("Final destination files:")
-    rclone.lsf(config.remote_base)
+    if config.transfer_mode == "archive":
+        print_log("Archiving...")
+        rclone.archive(directory, remote_dir)
+    else:
+        print_log("Copying...")
+        rclone.copy(directory, remote_dir)
 
     if delete_agreement:
         print_log("Deleting local dataset...")
