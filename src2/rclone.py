@@ -36,19 +36,19 @@ class Rclone:
 
 
     def lsf(self, remote_path: str) -> None:
-        self._log_run(["rclone", "lsf", f"{self.name}:{remote_path}", f"--config={self.config}"])
+        self._log_run(["rclone", "lsf", f"{self.name}:{remote_path}", f"--config={self.config}", "--sftp-known-hosts-file=none"])
 
 
     def mkdir(self, remote_path: str) -> None:
-        self._log_run(["rclone", "mkdir", f"{self.name}:{remote_path}", f"--config={self.config}"])
+        self._log_run(["rclone", "mkdir", f"{self.name}:{remote_path}", f"--config={self.config}", "--sftp-known-hosts-file=none"])
 
 
     def copy(self, local_path: str, remote_path: str) -> None:
-        self._log_run(["rclone", "copy", f"\\\\?\{local_path}", f"{self.name}:{remote_path}/{local_path.split('/')[-1]}", "--checksum", "--progress", f"--config={self.config}"])
+        self._log_run(["rclone", "copy", f"\\\\?\{local_path}", f"{self.name}:{remote_path}/{local_path.split('/')[-1]}", "--checksum", "--progress", f"--config={self.config}", "--sftp-known-hosts-file=none"])
 
 
     def archive(self, local_path: str, remote_path: str, format: Literal["zip", "tar", "tar.gz", "tar.bz2", "tar.lz", "tar.lz4", "tar.xz", "tar.zst", "tar.br", "tar.sz", "tar.mz"] = "tar.gz") -> None:
-        self._log_run(["rclone", "archive", "create", f"\\\\?\{local_path}", f"{self.name}:{remote_path}/{local_path.split('/')[-1]}.{format}", "--checksum", "--progress", "--format", format,  f"--config={self.config}"])
+        self._log_run(["rclone", "archive", "create", f"\\\\?\{local_path}", f"{self.name}:{remote_path}/{local_path.split('/')[-1]}.{format}", "--checksum", "--progress", "--format", format,  f"--config={self.config}"], "--sftp-known-hosts-file=none")
 
 
     def local_delete(self, local_path: str) -> None:

@@ -114,6 +114,22 @@ def prompt_delete_agreement() -> bool:
     return delete_agreement.get()
 
 
+def prompt_dataset_exists() -> None:
+    root = tkinter.Tk()
+    root.title("Dataset already exists!")
+    root.geometry("350x100")
+
+    message = ttk.Label(root, text="Please rename and try again.")
+    message.pack(pady=10)
+
+    confirm = ttk.Button(root, text="Confirm", command=root.destroy)
+    confirm.pack()
+
+    root.mainloop()
+
+    raise ValueError("Dataset already exists!")
+
+
 def main() -> None:
     create_log()
 
@@ -135,7 +151,8 @@ def main() -> None:
     delete_agreement = prompt_delete_agreement()
 
     print_log("Creating SSH keys...")
-    ssh = SSH(work_dir)
+    ssh = SSH(work_dir, config.remote_host)
+    sftp = ssh.sftp()
 
     start_time = datetime.datetime.now()
 
@@ -145,13 +162,27 @@ def main() -> None:
     print_log("Creating directories...")
     remote_dir = f"{config.remote_base}/{ssh.user}/{MACHINES[os.environ['COMPUTERNAME']]}"
     rclone.mkdir(remote_dir)
+    sftp.chmod(remote_dir, 0o700)
 
+    dataset = directory.split('/')[-1]
     if config.transfer_mode == "archive":
         print_log("Archiving...")
-        rclone.archive(directory, remote_dir)
-    else:
+        try:
+            sftp.stat(f"{remote_dir}/{dataset}.{config.archive_type}")
+            prompt_dataset_exists()
+        except FileNotFoundError:
+            rclone.archive(directory, remote_dir, config.archive_type)
+
+    elif config.transfer_mode == "copy":
         print_log("Copying...")
-        rclone.copy(directory, remote_dir)
+        try:
+            sftp.stat(f"{remote_dir}/{dataset}")
+            prompt_dataset_exists()
+        except FileNotFoundError:
+            rclone.copy(directory, remote_dir)
+
+    else:
+        raise ValueError("Transfer mode not supported.")
 
     if delete_agreement:
         print_log("Deleting local dataset...")
@@ -161,6 +192,7 @@ def main() -> None:
 
     print_log("Cleaning up...")
     rclone.local_delete(work_dir)
+    sftp.close()
 
     end_time = datetime.datetime.now()
     print_log(f"Process started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\nProcess finished: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
