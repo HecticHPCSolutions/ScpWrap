@@ -1,6 +1,0 @@
-entry = "main.py"
-
-[env]
-REMOTE_BASE = "/mnt/scoutfs/vault/MMI-Data-Hub"
-REMOTE_HOST = "scout-dtn1.erc.monash.edu"
-TRANSFER_MODE= "archive"

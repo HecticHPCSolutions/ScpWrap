@@ -1,5 +1,6 @@
 entry = "main.py"
 
 [env]
-REMOTE_HOST = "sshauthz.globus-development.cloud.edu.au"
-SSHAUTHZ = "https://sshauthz.globus-development.cloud.edu.au/?ca=ca"
+REMOTE_BASE = "/mnt/scoutfs/vault/MMI-Data-Hub"
+REMOTE_HOST = "scout-dtn1.erc.monash.edu"
+TRANSFER_MODE= "archive"
