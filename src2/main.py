@@ -5,6 +5,7 @@ import requests
 import sys
 import tempfile
 import tkinter
+import webbrowser
 
 from logging.handlers import TimedRotatingFileHandler
 from machines import MACHINES
@@ -15,7 +16,7 @@ from tkinter import filedialog
 from typing import Callable, Literal
 from pathlib import Path
 
-VERSION="v2.0"
+VERSION="v2.1"
 
 def print_log(message: str, level: Literal["debug", "info", "warning", "error", "critical"] = "info") -> None:
     print(message)
@@ -68,7 +69,7 @@ class Config:
 def parse_config() -> Config:
     return Config(**{
         "local_base": str(Path.home()),
-        "remote_base": 'merc-public-sftp',
+        "remote_base": os.environ['REMOTE_BASE'],
         "remote_host": os.environ['REMOTE_HOST'],
         "transfer_mode": os.environ.get("TRANSFER_MODE", "files").strip().lower(),
         "archive_type": os.environ.get("ARCHIVE_TYPE", "tar.gz").strip().lower()
@@ -115,18 +116,7 @@ def prompt_delete_agreement() -> bool:
 
 
 def prompt_dataset_exists() -> None:
-    root = tkinter.Tk()
-    root.title("Dataset already exists!")
-    root.geometry("350x100")
-
-    message = ttk.Label(root, text="Please rename and try again.")
-    message.pack(pady=10)
-
-    confirm = ttk.Button(root, text="Confirm", command=root.destroy)
-    confirm.pack()
-
-    root.mainloop()
-
+    tkinter.messagebox.showwarning("Dataset already exists!", "Please rename and try again.")
     raise ValueError("Dataset already exists!")
 
 
@@ -139,7 +129,6 @@ def main() -> None:
 
     print_log("Creating local temporary working directory...")
     work_dir = Path(tempfile.mkdtemp())
-    # work_dir = Path("C:\\Users\\mhar0048\\Programming\\ScpWrap\\workdir")
     work_dir.mkdir(parents=True, exist_ok=True)
 
     print_log("Parsing config...")
@@ -153,6 +142,10 @@ def main() -> None:
     print_log("Creating SSH keys...")
     ssh = SSH(work_dir, config.remote_host)
     sftp = ssh.sftp()
+    print_log(f"{ssh.user} successfully authenticated.")
+
+    print_log("Opening a browser for the user to log out...")
+    webbrowser.open("https://myaccount.google.com/")
 
     start_time = datetime.datetime.now()
 
@@ -162,7 +155,7 @@ def main() -> None:
     print_log("Creating directories...")
     remote_dir = f"{config.remote_base}/{ssh.user}/{MACHINES[os.environ['COMPUTERNAME']]}"
     rclone.mkdir(remote_dir)
-    sftp.chmod(remote_dir, 0o700)
+    sftp.chmod(f"{config.remote_base}/{ssh.user}", 0o700)
 
     dataset = directory.split('/')[-1]
     if config.transfer_mode == "archive":

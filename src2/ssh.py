@@ -39,8 +39,8 @@ class SSH:
 
 
     def _get_user(self) -> str:
-        with open(self.cert_path, "rb") as f:
-            return f.readline().decode().split()[-1]
+        cert_details = subprocess.run(["ssh-keygen", "-L", "-f", self.cert_path], capture_output=True, text=True)
+        return cert_details.stdout.split()[26]
 
 
     def sftp(self) -> paramiko.SFTPClient:
