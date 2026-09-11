@@ -1,13 +1,11 @@
 # SCP Wrap
 
-SCP wrap was written to upload data from a shared instrument PC to your own market or vault share. It uses OIDC authentication and SSH certificates to differentiate between users and give access to your share without compromising your data to other users of the instrument PC. In this way you will no longer need to directly mount your market or vault to a shared PC where you can forget to disconnect it compromising your data.
+SCP wrap was written to upload data from a shared instrument PC to your group's vault share. It uses OIDC authentication and SSH certificates to differentiate between users and give access to your share without compromising your data to other users of the instrument PC. In this way you will no longer need to directly mount your market or vault to a shared PC where you can forget to disconnect it compromising your data.
 
 ![SCP Wrap Diagram](./scpwrap.png)
 
 ## User Dependencies
-- A google account mapped to a user on the sshauthz server
-- A [market](https://docs.erc.monash.edu/RDS/UserGuides/MarketStorageUserGuide/) and/or [vault](https://docs.erc.monash.edu/RDS/UserGuides/VaultStorageUserGuide/) share to move data to - if you don't have one you will need to apply for one
-- A [market](https://docs.erc.monash.edu/RDS/UserGuides/MarketStorageUserGuide/) and/or [vault](https://docs.erc.monash.edu/RDS/UserGuides/VaultStorageUserGuide/) share mapped on the Data Transfer Gateway
+- Your Monash user must be added to the `rds-mmi-data-hub-vault` group by an MMI Admin
 
 ## Installation
 
@@ -34,7 +32,7 @@ Use this to build the scpwrap.exe file from source
    2. Windows: `.venv/Scripts/activate`
 2. `pycrucible -e src -o scpwrap.exe`
 
-## Instructions
+## Uploading Instructions
 0. Activate the virtual environment if you are using one
 1. Double click on `scpwrap.exe` or run the script in the command line
 2. Select a folder to move  
@@ -42,9 +40,17 @@ Use this to build the scpwrap.exe file from source
 3. Confirm if you are deleting the dataset after moving  
    ![Confirm](./confirm.png)
 4. Authenticate with your Google account (your Monash details) in the popup web browser  
-   ![Login](./login.png) ![Google](./google.png) ![Okta](./okta.png)
-5. Save your certificate  
-   ![Save Certificate](./save_cert.png)
-6.  Close the web browser
-7.  Leave the process running as it moves your data
-8.  Press ENTER to exit
+   ![Google](./google.png) ![Okta](./okta.png)
+5. Log out of all accounts  
+   ![Logout](./logout.png)
+6. Close the web browser
+7. Leave the process running as it moves your data
+8. Press ENTER to exit
+
+## Accessing Instructions
+1. Go to the [transfer tool website](https://transfer.erc.monash.edu/login)
+2. Login with your AAF account  
+   ![Transfer Login](./transfer_login.png) ![AAF](./aaf.png) ![Okta](./okta.png)
+3. Select RDS-Vault-new from the 'Host' dropdown  
+   ![Host](./host.png)
+4. Your data will be stored in the MMI-Data-Hub in a folder labelled with your authcate - if it's not linked in your home directory the full path is: `/mnt/scoutfs/vault/MMI-Data-Hub`
