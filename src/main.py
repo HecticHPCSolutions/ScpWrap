@@ -6,6 +6,7 @@ import sys
 import tempfile
 import tkinter
 import webbrowser
+import yaml
 
 from logging.handlers import TimedRotatingFileHandler
 from machines import MACHINES
@@ -16,7 +17,7 @@ from tkinter import filedialog
 from typing import Callable, Literal
 from pathlib import Path
 
-VERSION="v2.1"
+VERSION="v2.2"
 
 def print_log(message: str, level: Literal["debug", "info", "warning", "error", "critical"] = "info") -> None:
     print(message)
@@ -120,6 +121,17 @@ def prompt_dataset_exists() -> None:
     raise ValueError("Dataset already exists!")
 
 
+def get_yaml(url: str) -> dict:
+    response = requests.get(url, allow_redirects=True)
+    content = response.content.decode("utf-8")
+    return yaml.safe_load(content)
+
+
+def get_mmi() -> dict:
+    url = "https://gitlab.erc.monash.edu.au/instrument-upload/mmi-instruments/-/raw/main/map.yml?ref_type=heads"
+    return get_yaml(url)
+
+
 def main() -> None:
     create_log()
 
@@ -152,8 +164,17 @@ def main() -> None:
     print_log("Initialise rclone config...")
     rclone = Rclone("vault", config.remote_host, ssh.user, ssh.key_path, work_dir / "rclone.conf", ssh.cert_path)
 
+    print_log("Determining directory structure...")
+    computer_name = os.environ['COMPUTERNAME']
+    mmi = get_mmi()
+    
+    if computer_name in mmi:
+        readable_name = mmi[computer_name]
+    else:
+        readable_name = computer_name
+    
     print_log("Creating directories...")
-    remote_dir = f"{config.remote_base}/{ssh.user}/{MACHINES[os.environ['COMPUTERNAME']]}"
+    remote_dir = f"{config.remote_base}/{ssh.user}/{readable_name}"
     rclone.mkdir(remote_dir)
     sftp.chmod(f"{config.remote_base}/{ssh.user}", 0o700)
 

@@ -1,6 +1,8 @@
-# SCP Wrap
+# Instrument Uploader
 
-SCP wrap was written to upload data from a shared instrument PC to your group's vault share. It uses OIDC authentication and SSH certificates to differentiate between users and give access to your share without compromising your data to other users of the instrument PC. In this way you will no longer need to directly mount your market or vault to a shared PC where you can forget to disconnect it compromising your data.
+Instrument Uploader was written to upload data from a shared instrument PC to your group's vault share. It uses OIDC authentication and SSH certificates to differentiate between users and give access to your share without compromising your data to other users of the instrument PC. In this way you will no longer need to directly mount your market or vault to a shared PC where you can forget to disconnect it compromising your data.
+
+If you're looking for old releases of this software, you can find it on GitHub under the name [`SCPWrap`](https://github.com/HecticHPCSolutions/ScpWrap).
 
 ![SCP Wrap Diagram](./scpwrap.png)
 
