@@ -1,6 +1,6 @@
 .venv/
 __pycache__/
 pycrucible_payload/
-*.exe
+workdir/
 *.log*
 
